@@ -1,0 +1,46 @@
+# Updated requirements for Python 3.13 compatibility
+# Note: Some packages may have limited functionality
+
+# Core dependencies
+flask==2.3.0
+flask-cors==4.0.0
+pandas==2.1.4  # Updated for Python 3.13
+numpy==1.26.2  # Updated for Python 3.13
+scikit-learn==1.3.2  # Updated
+python-dotenv==1.0.0
+redis==5.0.1  # Updated
+plotly==5.18.0  # Updated
+openpyxl==3.1.2
+pyyaml==6.0.1
+
+# NLP and embeddings
+nltk==3.8.1
+spacy==3.7.2  # Updated
+sentence-transformers==2.2.2
+transformers==4.36.2  # Updated
+torch==2.1.2  # Updated for Python 3.13
+faiss-cpu==1.7.4
+
+# PDF processing
+pdfplumber==0.10.3
+PyPDF2==3.0.1
+pytesseract==0.3.10
+pdf2image==1.16.3
+Pillow==10.1.0  # Updated
+
+# LLM APIs
+openai==1.6.1  # Updated
+anthropic==0.8.1  # Updated
+
+# Development and testing
+pytest==7.4.3  # Updated
+black==23.12.1  # Updated
+flake8==6.1.0
+ipython==8.18.1  # Updated
+
+# Visualization
+matplotlib==3.8.2  # Updated
+seaborn==0.13.0  # Updated
+
+# API documentation
+flasgger==0.9.7.1
