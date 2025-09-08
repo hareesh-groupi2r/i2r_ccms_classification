@@ -51,6 +51,7 @@ class PDFExtractor:
     def extract_text(self, pdf_path: str) -> Tuple[str, str]:
         """
         Extract text from PDF, using OCR if necessary.
+        Now supports mixed documents with both text and scanned pages.
         
         Args:
             pdf_path: Path to the PDF file
@@ -63,17 +64,8 @@ class PDFExtractor:
         if not pdf_path.exists():
             raise FileNotFoundError(f"PDF file not found: {pdf_path}")
         
-        # First try regular text extraction
-        text, method = self._extract_with_pdfplumber(pdf_path)
-        
-        # Check if we got meaningful text
-        if text and len(text.strip()) > self.ocr_threshold:
-            logger.info(f"Extracted {len(text)} characters using {method}")
-            return text, method
-        
-        # Fall back to OCR for scanned PDFs
-        logger.info(f"Regular extraction failed, attempting OCR for {pdf_path}")
-        text, method = self._extract_with_ocr(pdf_path)
+        # Try hybrid extraction (text + OCR for scanned pages)
+        text, method = self._extract_hybrid(pdf_path)
         
         if not text:
             logger.warning(f"Failed to extract text from {pdf_path}")
@@ -81,6 +73,116 @@ class PDFExtractor:
         
         logger.info(f"Extracted {len(text)} characters using {method}")
         return text, method
+    
+    def _extract_hybrid(self, pdf_path: Path) -> Tuple[str, str]:
+        """
+        Extract text using hybrid approach: text extraction + OCR for scanned pages.
+        Respects max_pages limit and processes pages in order.
+        
+        Args:
+            pdf_path: Path to the PDF file
+            
+        Returns:
+            Tuple of (extracted_text, extraction_method)
+        """
+        try:
+            text_pages = []
+            methods_used = []
+            
+            with pdfplumber.open(pdf_path) as pdf:
+                total_pages = len(pdf.pages)
+                pages_to_process = min(total_pages, self.max_pages) if self.max_pages else total_pages
+                
+                logger.info(f"Processing {pages_to_process} of {total_pages} pages (max_pages: {self.max_pages})")
+                
+                for i, page in enumerate(pdf.pages[:pages_to_process]):
+                    page_num = i + 1
+                    page_text = ""
+                    method = "failed"
+                    
+                    try:
+                        # First try text extraction
+                        page_text = page.extract_text()
+                        
+                        # Check if we got meaningful text
+                        if page_text and len(page_text.strip()) > 50:  # At least 50 chars
+                            method = "text"
+                            logger.debug(f"Page {page_num}: Extracted {len(page_text)} chars via text")
+                        else:
+                            # Try OCR for this page
+                            logger.info(f"Page {page_num}: Text extraction insufficient, trying OCR...")
+                            page_text = self._extract_page_ocr(pdf_path, page_num)
+                            
+                            if page_text and len(page_text.strip()) > 20:  # Lower threshold for OCR
+                                method = "ocr"
+                                logger.debug(f"Page {page_num}: Extracted {len(page_text)} chars via OCR")
+                            else:
+                                logger.warning(f"Page {page_num}: Both text and OCR extraction failed")
+                                page_text = ""
+                                method = "failed"
+                    
+                    except Exception as e:
+                        logger.warning(f"Error processing page {page_num}: {e}")
+                        page_text = ""
+                        method = "error"
+                    
+                    # Add page content if we got something
+                    if page_text and page_text.strip():
+                        text_pages.append(f"Page {page_num}:\n{page_text.strip()}")
+                        methods_used.append(method)
+                
+                # Compile results
+                if text_pages:
+                    combined_text = "\n\n".join(text_pages)
+                    
+                    # Determine overall method
+                    if "ocr" in methods_used and "text" in methods_used:
+                        overall_method = f"hybrid_text+ocr({len(text_pages)}pages)"
+                    elif "ocr" in methods_used:
+                        overall_method = f"ocr_only({len(text_pages)}pages)" 
+                    else:
+                        overall_method = f"text_only({len(text_pages)}pages)"
+                    
+                    logger.info(f"Hybrid extraction successful: {len(combined_text)} chars using {overall_method}")
+                    return combined_text, overall_method
+                else:
+                    logger.warning("No pages could be processed successfully")
+                    return "", "hybrid_failed"
+                    
+        except Exception as e:
+            logger.error(f"Hybrid extraction failed: {e}")
+            return "", f"hybrid_error: {str(e)}"
+    
+    def _extract_page_ocr(self, pdf_path: Path, page_num: int) -> str:
+        """
+        Extract text from a specific page using OCR.
+        
+        Args:
+            pdf_path: Path to the PDF file
+            page_num: Page number (1-indexed)
+            
+        Returns:
+            Extracted text from the page
+        """
+        try:
+            # Convert specific page to image
+            images = convert_from_path(
+                pdf_path, 
+                dpi=self.dpi,
+                first_page=page_num,
+                last_page=page_num
+            )
+            
+            if not images:
+                return ""
+            
+            # Apply OCR to the page
+            page_text = pytesseract.image_to_string(images[0])
+            return self._clean_ocr_text(page_text)
+            
+        except Exception as e:
+            logger.warning(f"OCR failed for page {page_num}: {e}")
+            return ""
     
     def _extract_with_pdfplumber(self, pdf_path: Path) -> Tuple[str, str]:
         """

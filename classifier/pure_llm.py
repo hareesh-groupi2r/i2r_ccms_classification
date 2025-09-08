@@ -5,6 +5,7 @@ Direct classification using GPT-4 or Claude without training
 
 import json
 import os
+import re
 import time
 from typing import Dict, List, Optional, Tuple
 import logging
@@ -530,17 +531,70 @@ Return JSON:
         try:
             # Clean response if needed
             response = response.strip()
-            if response.startswith('```json'):
-                response = response[7:]
-            if response.endswith('```'):
-                response = response[:-3]
             
-            return json.loads(response)
-        
+            # Find JSON block within the response (handles explanatory text before JSON)
+            json_content = ""
+            
+            # Look for ```json block
+            json_match = re.search(r'```json\s*(.*?)\s*```', response, re.DOTALL)
+            if json_match:
+                json_content = json_match.group(1).strip()
+            else:
+                # Look for generic ``` block that might contain JSON
+                code_match = re.search(r'```\s*(.*?)\s*```', response, re.DOTALL)
+                if code_match:
+                    potential_json = code_match.group(1).strip()
+                    # Check if it looks like JSON (starts with { or [)
+                    if potential_json.startswith('{') or potential_json.startswith('['):
+                        json_content = potential_json
+                else:
+                    # Try to find JSON-like content (starts with { and ends with })
+                    json_match = re.search(r'\{.*\}', response, re.DOTALL)
+                    if json_match:
+                        json_content = json_match.group().strip()
+                    else:
+                        # Last resort: try the entire response if it looks like JSON
+                        if response.strip().startswith('{') and response.strip().endswith('}'):
+                            json_content = response.strip()
+            
+            if json_content:
+                logger.debug(f"Extracted JSON content: {json_content[:100]}...")
+                # Sanitize JSON content to fix common LLM formatting issues
+                json_content = self._sanitize_json(json_content)
+                return json.loads(json_content)
+            else:
+                logger.warning(f"No JSON content found in response: {response[:200]}...")
+                return {}
+                
         except json.JSONDecodeError as e:
             logger.error(f"Failed to parse LLM response: {e}")
             logger.debug(f"Response was: {response}")
+            logger.debug(f"Extracted JSON was: {json_content}")
             return {}
+    
+    def _sanitize_json(self, json_str: str) -> str:
+        """
+        Sanitize JSON string to fix common LLM formatting issues.
+        
+        Args:
+            json_str: Raw JSON string from LLM
+            
+        Returns:
+            Cleaned JSON string
+        """
+        # Fix common JSON formatting issues from LLMs
+        
+        # Fix: "text" and "more text" -> "text and more text"
+        # This handles cases where LLM puts quotes around parts of evidence
+        json_str = re.sub(r'"([^"]*?)" and "([^"]*?)"', r'"\1 and \2"', json_str)
+        
+        # Fix: trailing commas before closing brackets
+        json_str = re.sub(r',(\s*[}\]])', r'\1', json_str)
+        
+        # Fix: single quotes instead of double quotes (less common but possible)
+        json_str = re.sub(r"'([^']*?)':", r'"\1":', json_str)
+        
+        return json_str
     
     def _generate_validation_report(self, 
                                    original_issues: List[Dict],
