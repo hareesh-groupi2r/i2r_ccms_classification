@@ -80,9 +80,12 @@ class HybridRAGClassifier:
         Returns:
             LLM client instance
         """
+        # Try to get API key from config first, then environment
         api_key = self.config.get('api_key')
         
         if 'gpt' in self.llm_model.lower():
+            if not api_key:
+                api_key = os.getenv('OPENAI_API_KEY')
             if not api_key:
                 raise ValueError("OpenAI API key required for GPT models")
             # Don't set organization unless it's provided
@@ -93,6 +96,8 @@ class HybridRAGClassifier:
                 return OpenAI(api_key=api_key)
         
         elif 'claude' in self.llm_model.lower():
+            if not api_key:
+                api_key = os.getenv('ANTHROPIC_API_KEY')
             if not api_key:
                 raise ValueError("Anthropic API key required for Claude models")
             return anthropic.Anthropic(api_key=api_key)

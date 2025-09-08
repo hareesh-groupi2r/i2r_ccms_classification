@@ -1,0 +1,569 @@
+#!/usr/bin/env python3
+"""
+Batch PDF Processing System
+Configurable batch processing for contract correspondence classification
+"""
+
+import os
+import time
+import logging
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple, Any
+import pandas as pd
+import json
+from datetime import datetime
+import yaml
+
+from classifier.config_manager import ConfigManager
+from classifier.issue_mapper import IssueCategoryMapper
+from classifier.validation import ValidationEngine
+from classifier.data_sufficiency import DataSufficiencyAnalyzer
+from classifier.pure_llm import PureLLMClassifier
+from classifier.hybrid_rag import HybridRAGClassifier
+from classifier.pdf_extractor import PDFExtractor
+from extract_correspondence_content import CorrespondenceExtractor
+from metrics_calculator import MetricsCalculator
+
+logger = logging.getLogger(__name__)
+
+
+class BatchPDFProcessor:
+    """
+    Configurable batch PDF processing system for contract correspondence classification.
+    
+    Features:
+    - Configurable approach enable/disable (Pure LLM, Hybrid RAG)
+    - Optional ground truth evaluation with auto-detection
+    - Flexible input/output handling
+    - Performance metrics and reporting
+    - Error handling and recovery
+    """
+    
+    def __init__(self, config_path: str = None, batch_config_path: str = None):
+        """
+        Initialize the batch processor.
+        
+        Args:
+            config_path: Path to main configuration file (config.yaml)
+            batch_config_path: Path to batch configuration file (batch_config.yaml)
+        """
+        # Load configurations
+        self.config_manager = ConfigManager(config_path or "config.yaml")
+        self.config = self.config_manager.get_all_config()
+        
+        # Load batch-specific configuration
+        self.batch_config = self._load_batch_config(batch_config_path or "batch_config.yaml")
+        
+        # Initialize components
+        self._init_components()
+        
+        # Initialize classifiers based on configuration
+        self.classifiers = {}
+        self._init_classifiers()
+        
+        # Processing state
+        self.results = []
+        self.processing_stats = {
+            'total_files': 0,
+            'processed_files': 0,
+            'failed_files': 0,
+            'start_time': None,
+            'end_time': None
+        }
+    
+    def _load_batch_config(self, config_path: str) -> Dict:
+        """Load batch configuration from YAML file."""
+        try:
+            config_path = Path(config_path)
+            if config_path.exists():
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    return yaml.safe_load(f)
+            else:
+                logger.warning(f"Batch config file not found: {config_path}, using defaults")
+                return self._get_default_batch_config()
+        except Exception as e:
+            logger.error(f"Error loading batch config: {e}")
+            return self._get_default_batch_config()
+    
+    def _get_default_batch_config(self) -> Dict:
+        """Get default batch configuration."""
+        return {
+            'batch_processing': {
+                'enabled': True,
+                'approaches': {
+                    'hybrid_rag': {'enabled': True, 'priority': 1},
+                    'pure_llm': {'enabled': False, 'priority': 2}
+                },
+                'evaluation': {
+                    'enabled': True,
+                    'auto_detect_ground_truth': True,
+                    'ground_truth_patterns': ["EDMS*.xlsx", "ground_truth*.xlsx", "*_labels.xlsx"]
+                },
+                'output': {
+                    'results_folder': 'results',
+                    'save_format': 'xlsx'
+                },
+                'processing': {
+                    'max_pages_per_pdf': 2,
+                    'skip_on_error': True,
+                    'rate_limit_delay': 3
+                }
+            }
+        }
+    
+    def _init_components(self):
+        """Initialize shared components."""
+        training_data_path = Path(self.config['data']['training_data'])
+        
+        self.issue_mapper = IssueCategoryMapper(training_data_path)
+        self.validator = ValidationEngine(training_data_path)
+        self.data_analyzer = DataSufficiencyAnalyzer(training_data_path)
+        self.pdf_extractor = PDFExtractor(
+            max_pages=self.batch_config['batch_processing']['processing'].get('max_pages_per_pdf', 2)
+        )
+        self.correspondence_extractor = CorrespondenceExtractor()
+        
+        # Initialize metrics calculator if evaluation is enabled
+        if self.batch_config['batch_processing']['evaluation']['enabled']:
+            self.metrics_calculator = MetricsCalculator()
+        else:
+            self.metrics_calculator = None
+        
+        logger.info("Batch processor components initialized")
+    
+    def _init_classifiers(self):
+        """Initialize classifiers based on configuration."""
+        batch_approaches = self.batch_config['batch_processing']['approaches']
+        
+        # Initialize Hybrid RAG if enabled
+        if batch_approaches.get('hybrid_rag', {}).get('enabled', False):
+            if self.config['approaches']['hybrid_rag']['enabled']:
+                self.classifiers['hybrid_rag'] = HybridRAGClassifier(
+                    config=self.config['approaches']['hybrid_rag'],
+                    issue_mapper=self.issue_mapper,
+                    validator=self.validator,
+                    data_analyzer=self.data_analyzer
+                )
+                logger.info("✅ Hybrid RAG classifier initialized")
+            else:
+                logger.warning("⚠️ Hybrid RAG requested but disabled in main config")
+        
+        # Initialize Pure LLM if enabled
+        if batch_approaches.get('pure_llm', {}).get('enabled', False):
+            if self.config['approaches']['pure_llm']['enabled']:
+                self.classifiers['pure_llm'] = PureLLMClassifier(
+                    config=self.config['approaches']['pure_llm'],
+                    issue_mapper=self.issue_mapper,
+                    validator=self.validator,
+                    data_analyzer=self.data_analyzer
+                )
+                logger.info("✅ Pure LLM classifier initialized")
+            else:
+                logger.warning("⚠️ Pure LLM requested but disabled in main config")
+        
+        if not self.classifiers:
+            raise ValueError("No classifiers enabled! Please enable at least one approach.")
+        
+        logger.info(f"🚀 Initialized {len(self.classifiers)} classifiers: {list(self.classifiers.keys())}")
+    
+    def process_pdf_folder(self, 
+                          pdf_folder: str, 
+                          ground_truth_file: str = None,
+                          output_folder: str = None) -> Dict:
+        """
+        Process all PDFs in a folder with optional ground truth evaluation.
+        
+        Args:
+            pdf_folder: Path to folder containing PDF files
+            ground_truth_file: Optional path to ground truth Excel file
+            output_folder: Optional custom output folder
+            
+        Returns:
+            Dictionary containing processing results and metrics
+        """
+        pdf_folder = Path(pdf_folder)
+        if not pdf_folder.exists():
+            raise FileNotFoundError(f"PDF folder not found: {pdf_folder}")
+        
+        # Auto-detect ground truth if enabled and not provided
+        if ground_truth_file is None and self.batch_config['batch_processing']['evaluation']['auto_detect_ground_truth']:
+            ground_truth_file = self._auto_detect_ground_truth(pdf_folder)
+        
+        # Load ground truth if available
+        ground_truth = None
+        if ground_truth_file and self.metrics_calculator:
+            ground_truth = self._load_ground_truth(ground_truth_file)
+            logger.info(f"📊 Loaded ground truth for {len(ground_truth)} files")
+        elif self.metrics_calculator:
+            logger.info("📊 Metrics calculation enabled but no ground truth found")
+        
+        # Find PDF files
+        pdf_files = list(pdf_folder.glob("*.pdf"))
+        if not pdf_files:
+            raise ValueError(f"No PDF files found in {pdf_folder}")
+        
+        logger.info(f"📄 Found {len(pdf_files)} PDF files to process")
+        
+        # Initialize processing
+        self.processing_stats['total_files'] = len(pdf_files)
+        self.processing_stats['start_time'] = datetime.now()
+        self.results = []
+        
+        # Process each PDF
+        for i, pdf_file in enumerate(pdf_files, 1):
+            logger.info(f"📄 [{i}/{len(pdf_files)}] Processing: {pdf_file.name}")
+            
+            try:
+                result = self._process_single_pdf(pdf_file, ground_truth)
+                self.results.append(result)
+                self.processing_stats['processed_files'] += 1
+                
+                # Rate limiting
+                rate_limit = self.batch_config['batch_processing']['processing'].get('rate_limit_delay', 3)
+                if i < len(pdf_files) and rate_limit > 0:  # Don't delay after last file
+                    logger.debug(f"⏳ Rate limiting delay ({rate_limit}s)...")
+                    time.sleep(rate_limit)
+                    
+            except Exception as e:
+                logger.error(f"❌ Failed to process {pdf_file.name}: {e}")
+                self.processing_stats['failed_files'] += 1
+                
+                if not self.batch_config['batch_processing']['processing'].get('skip_on_error', True):
+                    raise
+                    
+                # Add failed result placeholder
+                self.results.append({
+                    'file_name': pdf_file.name,
+                    'status': 'failed',
+                    'error': str(e),
+                    'approaches': {}
+                })
+        
+        self.processing_stats['end_time'] = datetime.now()
+        
+        # Generate final results
+        final_results = self._generate_final_results(ground_truth, output_folder)
+        
+        logger.info(f"🎉 Batch processing completed!")
+        logger.info(f"📊 Processed: {self.processing_stats['processed_files']}/{self.processing_stats['total_files']} files")
+        logger.info(f"⏱️  Total time: {self.processing_stats['end_time'] - self.processing_stats['start_time']}")
+        
+        return final_results
+    
+    def _auto_detect_ground_truth(self, pdf_folder: Path) -> Optional[str]:
+        """Auto-detect ground truth files in the PDF folder or parent directories."""
+        patterns = self.batch_config['batch_processing']['evaluation']['ground_truth_patterns']
+        
+        # Search in PDF folder and parent directories
+        search_paths = [pdf_folder, pdf_folder.parent, pdf_folder.parent.parent]
+        
+        for search_path in search_paths:
+            for pattern in patterns:
+                matches = list(search_path.glob(pattern))
+                if matches:
+                    ground_truth_file = matches[0]
+                    logger.info(f"📊 Auto-detected ground truth: {ground_truth_file}")
+                    return str(ground_truth_file)
+        
+        logger.info("📊 No ground truth file auto-detected")
+        return None
+    
+    def _load_ground_truth(self, ground_truth_file: str) -> Dict:
+        """Load ground truth from Excel file."""
+        try:
+            df = pd.read_excel(ground_truth_file)
+            
+            # Convert to dictionary format expected by metrics calculator
+            ground_truth = {}
+            for _, row in df.iterrows():
+                file_name = str(row.iloc[0])  # First column is file name
+                categories = []
+                
+                # Collect non-empty categories from remaining columns
+                for col_idx in range(1, len(row)):
+                    if pd.notna(row.iloc[col_idx]) and str(row.iloc[col_idx]).strip():
+                        categories.append(str(row.iloc[col_idx]).strip())
+                
+                ground_truth[file_name] = categories
+            
+            return ground_truth
+            
+        except Exception as e:
+            logger.error(f"Failed to load ground truth from {ground_truth_file}: {e}")
+            return {}
+    
+    def _process_single_pdf(self, pdf_file: Path, ground_truth: Dict = None) -> Dict:
+        """Process a single PDF file with all enabled approaches."""
+        result = {
+            'file_name': pdf_file.name,
+            'file_path': str(pdf_file),
+            'status': 'completed',
+            'processing_time': 0,
+            'approaches': {},
+            'ground_truth': ground_truth.get(pdf_file.name, []) if ground_truth else [],
+            'metrics': {}
+        }
+        
+        start_time = time.time()
+        
+        try:
+            # Extract text and correspondence content
+            raw_text, extraction_method = self.pdf_extractor.extract_text(pdf_file)
+            extraction_result = self.correspondence_extractor.extract_correspondence_content(raw_text)
+            
+            focused_content = f"Subject: {extraction_result['subject']}\n\nContent: {extraction_result['body']}"
+            
+            result['text_info'] = {
+                'raw_length': len(raw_text),
+                'focused_length': len(focused_content),
+                'extraction_method': extraction_method,
+                'correspondence_method': extraction_result['extraction_method']
+            }
+            
+            # Process with each enabled approach
+            for approach_name, classifier in self.classifiers.items():
+                logger.info(f"  🔍 Classifying with {approach_name.replace('_', ' ').title()} approach...")
+                
+                approach_start = time.time()
+                approach_result = classifier.classify(focused_content, is_file_path=False)
+                approach_time = time.time() - approach_start
+                
+                # Extract categories
+                categories = [cat.get('category', '') for cat in approach_result.get('categories', [])]
+                
+                result['approaches'][approach_name] = {
+                    'categories': categories,
+                    'processing_time': approach_time,
+                    'provider_used': approach_result.get('llm_provider_used', approach_result.get('method_used', 'unknown')),
+                    'full_result': approach_result
+                }
+                
+                logger.info(f"    ✅ {approach_name.replace('_', ' ').title()}: {approach_time:.2f}s - Categories: {categories}")
+            
+            # Calculate metrics if ground truth is available and metrics calculator is enabled
+            if self.metrics_calculator and ground_truth and pdf_file.name in ground_truth:
+                gt_categories = ground_truth[pdf_file.name]
+                
+                for approach_name in result['approaches']:
+                    predicted_categories = result['approaches'][approach_name]['categories']
+                    metrics = self.metrics_calculator.calculate_metrics(gt_categories, predicted_categories)
+                    result['approaches'][approach_name]['metrics'] = metrics
+            
+            result['processing_time'] = time.time() - start_time
+            
+        except Exception as e:
+            result['status'] = 'failed'
+            result['error'] = str(e)
+            result['processing_time'] = time.time() - start_time
+            raise
+        
+        return result
+    
+    def _generate_final_results(self, ground_truth: Dict = None, output_folder: str = None) -> Dict:
+        """Generate and save final results."""
+        if not output_folder:
+            output_folder = self.batch_config['batch_processing']['output']['results_folder']
+        
+        output_path = Path(output_folder)
+        output_path.mkdir(parents=True, exist_ok=True)
+        
+        # Generate timestamp for unique filenames
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        # Prepare results for saving
+        final_results = {
+            'processing_stats': self.processing_stats,
+            'config': {
+                'batch_config': self.batch_config,
+                'enabled_approaches': list(self.classifiers.keys())
+            },
+            'results': self.results
+        }
+        
+        # Calculate overall metrics if ground truth is available
+        if self.metrics_calculator and ground_truth:
+            overall_metrics = self._calculate_overall_metrics(ground_truth)
+            final_results['overall_metrics'] = overall_metrics
+        
+        # Save results in requested format
+        save_format = self.batch_config['batch_processing']['output'].get('save_format', 'xlsx')
+        
+        if save_format == 'xlsx':
+            excel_path = output_path / f"batch_results_{timestamp}.xlsx"
+            self._save_results_excel(final_results, excel_path)
+            logger.info(f"💾 Results saved to Excel: {excel_path}")
+        
+        # Always save JSON for programmatic access
+        json_path = output_path / f"batch_results_{timestamp}.json"
+        with open(json_path, 'w', encoding='utf-8') as f:
+            json.dump(final_results, f, indent=2, default=str)
+        logger.info(f"💾 Results saved to JSON: {json_path}")
+        
+        return final_results
+    
+    def _calculate_overall_metrics(self, ground_truth: Dict) -> Dict:
+        """Calculate overall metrics across all files and approaches."""
+        overall_metrics = {}
+        
+        for approach_name in self.classifiers.keys():
+            all_gt = []
+            all_pred = []
+            
+            for result in self.results:
+                if result['status'] == 'completed' and approach_name in result['approaches']:
+                    file_name = result['file_name']
+                    if file_name in ground_truth:
+                        all_gt.append(ground_truth[file_name])
+                        all_pred.append(result['approaches'][approach_name]['categories'])
+            
+            if all_gt and all_pred:
+                metrics = self.metrics_calculator.calculate_batch_metrics(all_gt, all_pred)
+                overall_metrics[approach_name] = metrics
+        
+        return overall_metrics
+    
+    def _save_results_excel(self, results: Dict, excel_path: Path):
+        """Save results to Excel file with multiple sheets."""
+        with pd.ExcelWriter(excel_path, engine='openpyxl') as writer:
+            # Summary sheet
+            summary_data = []
+            for result in results['results']:
+                if result['status'] == 'completed':
+                    row = {
+                        'File Name': result['file_name'],
+                        'Processing Time (s)': result['processing_time'],
+                        'Ground Truth': ', '.join(result.get('ground_truth', [])),
+                    }
+                    
+                    # Add approach results
+                    for approach_name, approach_data in result['approaches'].items():
+                        row[f'{approach_name.replace("_", " ").title()} Categories'] = ', '.join(approach_data['categories'])
+                        row[f'{approach_name.replace("_", " ").title()} Time (s)'] = approach_data['processing_time']
+                        
+                        # Add metrics if available
+                        if 'metrics' in approach_data:
+                            metrics = approach_data['metrics']
+                            row[f'{approach_name.replace("_", " ").title()} Precision'] = metrics.get('precision', '')
+                            row[f'{approach_name.replace("_", " ").title()} Recall'] = metrics.get('recall', '')
+                            row[f'{approach_name.replace("_", " ").title()} F1'] = metrics.get('f1_score', '')
+                    
+                    summary_data.append(row)
+                else:
+                    summary_data.append({
+                        'File Name': result['file_name'],
+                        'Status': result['status'],
+                        'Error': result.get('error', '')
+                    })
+            
+            summary_df = pd.DataFrame(summary_data)
+            summary_df.to_excel(writer, sheet_name='Summary', index=False)
+            
+            # Overall metrics sheet if available
+            if 'overall_metrics' in results:
+                metrics_data = []
+                for approach_name, metrics in results['overall_metrics'].items():
+                    metrics_data.append({
+                        'Approach': approach_name.replace('_', ' ').title(),
+                        'Precision': metrics.get('precision', ''),
+                        'Recall': metrics.get('recall', ''),
+                        'F1 Score': metrics.get('f1_score', ''),
+                        'Accuracy': metrics.get('accuracy', ''),
+                        'Total Files': metrics.get('total_files', ''),
+                        'Correct Predictions': metrics.get('correct_predictions', '')
+                    })
+                
+                metrics_df = pd.DataFrame(metrics_data)
+                metrics_df.to_excel(writer, sheet_name='Overall Metrics', index=False)
+            
+            # Processing stats sheet
+            stats_data = [{
+                'Metric': k.replace('_', ' ').title(),
+                'Value': str(v)
+            } for k, v in results['processing_stats'].items()]
+            
+            stats_df = pd.DataFrame(stats_data)
+            stats_df.to_excel(writer, sheet_name='Processing Stats', index=False)
+
+
+# Convenience functions for easy usage
+def process_lot_pdfs(pdf_folder: str, 
+                    ground_truth_file: str = None,
+                    enable_llm: bool = False,
+                    enable_metrics: bool = True,
+                    output_folder: str = None) -> Dict:
+    """
+    Convenience function to process a lot of PDFs with simple parameters.
+    
+    Args:
+        pdf_folder: Path to folder containing PDF files
+        ground_truth_file: Optional path to ground truth Excel file
+        enable_llm: Whether to enable Pure LLM approach (default: False)
+        enable_metrics: Whether to enable metrics calculation (default: True)
+        output_folder: Optional custom output folder
+        
+    Returns:
+        Dictionary containing processing results and metrics
+    """
+    # Create temporary batch config
+    temp_config = {
+        'batch_processing': {
+            'enabled': True,
+            'approaches': {
+                'hybrid_rag': {'enabled': True, 'priority': 1},
+                'pure_llm': {'enabled': enable_llm, 'priority': 2}
+            },
+            'evaluation': {
+                'enabled': enable_metrics,
+                'auto_detect_ground_truth': ground_truth_file is None,
+                'ground_truth_patterns': ["EDMS*.xlsx", "ground_truth*.xlsx", "*_labels.xlsx"]
+            },
+            'output': {
+                'results_folder': output_folder or 'results',
+                'save_format': 'xlsx'
+            },
+            'processing': {
+                'max_pages_per_pdf': 2,
+                'skip_on_error': True,
+                'rate_limit_delay': 3
+            }
+        }
+    }
+    
+    # Save temporary config
+    temp_config_path = Path("temp_batch_config.yaml")
+    with open(temp_config_path, 'w') as f:
+        yaml.dump(temp_config, f)
+    
+    try:
+        # Process with temporary config
+        processor = BatchPDFProcessor(batch_config_path=str(temp_config_path))
+        return processor.process_pdf_folder(pdf_folder, ground_truth_file, output_folder)
+    finally:
+        # Cleanup temporary config
+        if temp_config_path.exists():
+            temp_config_path.unlink()
+
+
+if __name__ == "__main__":
+    # Example usage
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='Batch PDF Processing')
+    parser.add_argument('pdf_folder', help='Path to PDF folder')
+    parser.add_argument('--ground-truth', help='Path to ground truth Excel file')
+    parser.add_argument('--enable-llm', action='store_true', help='Enable Pure LLM approach')
+    parser.add_argument('--disable-metrics', action='store_true', help='Disable metrics calculation')
+    parser.add_argument('--output', help='Output folder path')
+    
+    args = parser.parse_args()
+    
+    # Process PDFs
+    results = process_lot_pdfs(
+        pdf_folder=args.pdf_folder,
+        ground_truth_file=args.ground_truth,
+        enable_llm=args.enable_llm,
+        enable_metrics=not args.disable_metrics,
+        output_folder=args.output
+    )
+    
+    print(f"Processing completed! Results saved to: {results.get('output_path', 'results/')}")

@@ -3,16 +3,16 @@
 # Approach configuration - Enable/disable different classification approaches
 approaches:
   pure_llm:
-    enabled: true
+    enabled: true  # Can be toggled via batch processing config
     model: "gpt-4-turbo"  # Options: gpt-4-turbo, gpt-4, gpt-3.5-turbo, claude-3-opus, claude-3-sonnet
     max_tokens: 4096
     temperature: 0.1
     validate_mapping: true
     
   hybrid_rag:
-    enabled: true
+    enabled: true  # Recommended to keep enabled for better performance
     embedding_model: "all-mpnet-base-v2"
-    llm_model: "gpt-3.5-turbo"
+    llm_model: "claude-sonnet-4-20250514"  # Use Anthropic instead of OpenAI
     vector_db: "faiss"  # Options: faiss, pinecone, qdrant
     top_k: 15
     window_size: 3

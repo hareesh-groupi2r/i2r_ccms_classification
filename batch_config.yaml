@@ -1,0 +1,54 @@
+# Batch Processing Configuration
+# Extends the main config.yaml with batch-specific settings
+
+# Batch processing settings
+batch_processing:
+  # Core settings
+  enabled: true
+  max_batch_size: 10
+  parallel_workers: 4
+  rate_limit_delay: 3  # seconds between API calls
+  
+  # Approach selection
+  approaches:
+    hybrid_rag:
+      enabled: true
+      priority: 1  # Always run (highest priority)
+    pure_llm:
+      enabled: false  # Can be toggled on/off
+      priority: 2     # Run only when enabled
+      
+  # Metrics and evaluation
+  evaluation:
+    enabled: true  # Enable metrics computation by default
+    auto_detect_ground_truth: true  # Look for EDMS*.xlsx files
+    ground_truth_patterns:
+      - "EDMS*.xlsx"
+      - "ground_truth*.xlsx" 
+      - "*_labels.xlsx"
+    
+  # Input/Output settings
+  input:
+    pdf_folder: null  # Will be set at runtime
+    recursive_search: true
+    supported_formats: [".pdf"]
+    
+  output:
+    results_folder: "results"
+    save_format: "xlsx"  # Options: xlsx, json, csv
+    include_raw_text: false
+    include_confidence_scores: true
+    
+  # Processing options
+  processing:
+    extract_correspondence: true
+    max_pages_per_pdf: 2
+    ocr_fallback: true
+    skip_on_error: true  # Continue processing other files on error
+    
+  # Reporting
+  reporting:
+    generate_summary: true
+    include_performance_metrics: true
+    save_individual_results: true
+    create_comparison_charts: false  # Requires matplotlib
