@@ -1,0 +1,39 @@
+[Unit]
+Description=CCMS Classification API Service
+Documentation=https://github.com/your-org/ccms-classification
+After=network.target
+Wants=network.target
+
+[Service]
+Type=forking
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/ccms-classification
+Environment=PATH=/opt/ccms-classification/venv/bin
+Environment=ENVIRONMENT=production
+Environment=PORT=8000
+Environment=HOST=0.0.0.0
+Environment=WORKERS=4
+ExecStart=/opt/ccms-classification/service.sh start
+ExecStop=/opt/ccms-classification/service.sh stop
+ExecReload=/opt/ccms-classification/service.sh restart
+Restart=on-failure
+RestartSec=10
+KillMode=mixed
+TimeoutStartSec=90
+TimeoutStopSec=30
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/ccms-classification/logs
+ReadWritePaths=/opt/ccms-classification/data
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=4096
+
+[Install]
+WantedBy=multi-user.target
