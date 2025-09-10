@@ -21,6 +21,7 @@ from classifier.data_sufficiency import DataSufficiencyAnalyzer
 from classifier.pure_llm import PureLLMClassifier
 from classifier.hybrid_rag import HybridRAGClassifier
 from classifier.pdf_extractor import PDFExtractor
+from classifier.category_normalizer import CategoryNormalizer
 from extract_correspondence_content import CorrespondenceExtractor
 from metrics_calculator import MetricsCalculator
 
@@ -122,6 +123,7 @@ class BatchPDFProcessor:
             max_pages=self.batch_config['batch_processing']['processing'].get('max_pages_per_pdf', 2)
         )
         self.correspondence_extractor = CorrespondenceExtractor()
+        self.category_normalizer = CategoryNormalizer(strict_mode=False)
         
         # Initialize metrics calculator if evaluation is enabled
         if self.batch_config['batch_processing']['evaluation']['enabled']:
@@ -273,18 +275,83 @@ class BatchPDFProcessor:
         try:
             df = pd.read_excel(ground_truth_file)
             
-            # Convert to dictionary format expected by metrics calculator
+            # Auto-detect the format and find the correct columns
             ground_truth = {}
-            for _, row in df.iterrows():
-                file_name = str(row.iloc[0])  # First column is file name
-                categories = []
+            
+            # Check if this looks like the LOT-21 format (has "Sr. No" in first data row)
+            if len(df) > 1 and str(df.iloc[1, 0]).strip() == "Sr. No":
+                logger.info("📊 Detected LOT-21 ground truth format")
+                # LOT-21 format: skip first 2 rows (headers), file name in column 2, categories in column 5
                 
-                # Collect non-empty categories from remaining columns
-                for col_idx in range(1, len(row)):
-                    if pd.notna(row.iloc[col_idx]) and str(row.iloc[col_idx]).strip():
-                        categories.append(str(row.iloc[col_idx]).strip())
-                
-                ground_truth[file_name] = categories
+                for idx in range(2, len(df)):
+                    row = df.iloc[idx]
+                    
+                    # File name is in column 2, add .pdf extension if missing
+                    file_name_raw = str(row.iloc[2]) if pd.notna(row.iloc[2]) else ""
+                    if not file_name_raw or file_name_raw.strip() in ["", "nan"]:
+                        continue
+                    
+                    file_name = file_name_raw.strip()
+                    if not file_name.lower().endswith('.pdf'):
+                        file_name = file_name + '.pdf'
+                    
+                    # Categories are in column 5, comma-separated
+                    categories_raw = str(row.iloc[5]) if pd.notna(row.iloc[5]) else ""
+                    
+                    if categories_raw and categories_raw.strip() not in ["", "nan"]:
+                        # Use the CategoryNormalizer to parse and normalize categories
+                        normalized_categories = self.category_normalizer.parse_and_normalize_categories(categories_raw)
+                        
+                        # Consolidate categories for the same file
+                        if file_name in ground_truth:
+                            # Add new categories to existing ones, avoiding duplicates
+                            for cat in normalized_categories:
+                                if cat not in ground_truth[file_name]:
+                                    ground_truth[file_name].append(cat)
+                        else:
+                            # First occurrence of this file
+                            ground_truth[file_name] = normalized_categories
+            
+            else:
+                # Generic format: first column is file name, remaining columns are categories  
+                logger.info("📊 Using generic ground truth format")
+                for _, row in df.iterrows():
+                    file_name = str(row.iloc[0])  # First column is file name
+                    if not file_name or file_name.strip() in ["", "nan"]:
+                        continue
+                        
+                    raw_categories = []
+                    # Collect non-empty categories from remaining columns
+                    for col_idx in range(1, len(row)):
+                        if pd.notna(row.iloc[col_idx]) and str(row.iloc[col_idx]).strip():
+                            cat = str(row.iloc[col_idx]).strip()
+                            if cat not in ["", "nan"]:
+                                raw_categories.append(cat)
+                    
+                    # Normalize categories using CategoryNormalizer
+                    normalized_categories = []
+                    for cat in raw_categories:
+                        norm_cat, status, confidence = self.category_normalizer.normalize_category(cat)
+                        if norm_cat and norm_cat not in normalized_categories:
+                            normalized_categories.append(norm_cat)
+                    
+                    # Consolidate categories for the same file
+                    if file_name in ground_truth:
+                        # Add new categories to existing ones, avoiding duplicates
+                        for cat in normalized_categories:
+                            if cat not in ground_truth[file_name]:
+                                ground_truth[file_name].append(cat)
+                    else:
+                        # First occurrence of this file
+                        ground_truth[file_name] = normalized_categories
+            
+            # Remove files with no categories
+            ground_truth = {k: v for k, v in ground_truth.items() if v}
+            
+            logger.info(f"📊 Loaded ground truth for {len(ground_truth)} files")
+            if logger.isEnabledFor(logging.DEBUG):
+                for file_name, categories in list(ground_truth.items())[:5]:  # Show first 5
+                    logger.debug(f"📊 {file_name}: {categories}")
             
             return ground_truth
             
@@ -332,17 +399,26 @@ class BatchPDFProcessor:
                 approach_result = classifier.classify(focused_content, is_file_path=False)
                 approach_time = time.time() - approach_start
                 
-                # Extract categories with confidence scores
+                # Extract categories with confidence scores, filtering by confidence threshold
                 categories = []
                 category_details = []
+                confidence_threshold = 0.5
+                
                 for cat_info in approach_result.get('categories', []):
                     category = cat_info.get('category', '')
                     confidence = cat_info.get('confidence', 0.0)
-                    categories.append(category)
-                    category_details.append({
-                        'category': category,
-                        'confidence': confidence
-                    })
+                    
+                    # Only include categories with confidence >= threshold
+                    if confidence >= confidence_threshold:
+                        categories.append(category)
+                        category_details.append({
+                            'category': category,
+                            'confidence': confidence
+                        })
+                    else:
+                        logger.debug(f"Filtered out low confidence category '{category}' ({confidence:.3f} < {confidence_threshold})")
+                
+                logger.info(f"    Kept {len(categories)} categories above {confidence_threshold} confidence threshold")
                 
                 result['approaches'][approach_name] = {
                     'categories': categories,
@@ -360,7 +436,12 @@ class BatchPDFProcessor:
                 
                 for approach_name in result['approaches']:
                     predicted_categories = result['approaches'][approach_name]['categories']
-                    metrics = self.metrics_calculator.calculate_metrics(gt_categories, predicted_categories)
+                    
+                    # Filter out "Others" category for metrics calculation
+                    gt_categories_filtered = [cat for cat in gt_categories if cat.lower() != 'others']
+                    predicted_categories_filtered = [cat for cat in predicted_categories if cat.lower() != 'others']
+                    
+                    metrics = self.metrics_calculator.calculate_metrics(gt_categories_filtered, predicted_categories_filtered)
                     result['approaches'][approach_name]['metrics'] = metrics
             
             result['processing_time'] = time.time() - start_time
@@ -416,7 +497,7 @@ class BatchPDFProcessor:
         return final_results
     
     def _calculate_overall_metrics(self, ground_truth: Dict) -> Dict:
-        """Calculate overall metrics across all files and approaches."""
+        """Calculate overall metrics across all files and approaches, excluding 'Others' category."""
         overall_metrics = {}
         
         for approach_name in self.classifiers.keys():
@@ -427,8 +508,12 @@ class BatchPDFProcessor:
                 if result['status'] == 'completed' and approach_name in result['approaches']:
                     file_name = result['file_name']
                     if file_name in ground_truth:
-                        all_gt.append(ground_truth[file_name])
-                        all_pred.append(result['approaches'][approach_name]['categories'])
+                        # Filter out "Others" category for metrics calculation
+                        gt_categories_filtered = [cat for cat in ground_truth[file_name] if cat.lower() != 'others']
+                        pred_categories_filtered = [cat for cat in result['approaches'][approach_name]['categories'] if cat.lower() != 'others']
+                        
+                        all_gt.append(gt_categories_filtered)
+                        all_pred.append(pred_categories_filtered)
             
             if all_gt and all_pred:
                 metrics = self.metrics_calculator.calculate_batch_metrics(all_gt, all_pred)
@@ -437,7 +522,7 @@ class BatchPDFProcessor:
         return overall_metrics
     
     def _save_results_excel(self, results: Dict, excel_path: Path):
-        """Save results to Excel file with multiple sheets."""
+        """Save results to Excel file with multiple sheets, formatted and sorted."""
         with pd.ExcelWriter(excel_path, engine='openpyxl') as writer:
             # Summary sheet
             summary_data = []
@@ -447,7 +532,7 @@ class BatchPDFProcessor:
                         'File Name': result['file_name'],
                         'Subject': result.get('subject', ''),
                         'Body': result.get('body', ''),
-                        'Processing Time (s)': result['processing_time'],
+                        'Processing Time (s)': f"{result['processing_time']:.2f}",
                         'Ground Truth': ', '.join(result.get('ground_truth', [])),
                     }
                     
@@ -462,18 +547,22 @@ class BatchPDFProcessor:
                             conf = cat_detail.get('confidence', 0.0)
                             categories_with_confidence.append(f"{cat} ({conf:.3f})")
                         
-                        row[f'{approach_title} Categories'] = ', '.join(approach_data['categories'])
-                        row[f'{approach_title} Categories with Confidence'] = ', '.join(categories_with_confidence)
-                        row[f'{approach_title} Time (s)'] = approach_data['processing_time']
-                        row[f'{approach_title} Provider'] = approach_data.get('provider_used', 'unknown')
+                        row['Categories'] = ', '.join(approach_data['categories'])
+                        row['Categories with Confidence'] = ', '.join(categories_with_confidence)
+                        row['RAG Time (s)'] = f"{approach_data['processing_time']:.2f}"
                         
                         # Add metrics if available
                         if 'metrics' in approach_data:
                             metrics = approach_data['metrics']
-                            row[f'{approach_title} Precision'] = metrics.get('precision', '')
-                            row[f'{approach_title} Recall'] = metrics.get('recall', '')
-                            row[f'{approach_title} F1'] = metrics.get('f1_score', '')
-                            row[f'{approach_title} Exact Match'] = metrics.get('exact_match', '')
+                            row['Precision'] = f"{metrics.get('precision', 0):.4f}" if metrics.get('precision') is not None else ''
+                            row['Recall'] = f"{metrics.get('recall', 0):.4f}" if metrics.get('recall') is not None else ''
+                            row['F1'] = f"{metrics.get('f1_score', 0):.4f}" if metrics.get('f1_score') is not None else ''
+                            row['Exact Match'] = f"{metrics.get('exact_match', 0):.4f}" if metrics.get('exact_match') is not None else ''
+                            row['True Positives'] = metrics.get('tp', '')
+                            row['False Positives'] = metrics.get('fp', '')
+                            row['False Negatives'] = metrics.get('fn', '')
+                            row['False Negatives List'] = ', '.join(metrics.get('missed_categories', [])) if metrics.get('missed_categories') else ''
+                            row['Jaccard Similarity'] = f"{metrics.get('jaccard_similarity', 0):.4f}" if metrics.get('jaccard_similarity') is not None else ''
                     
                     summary_data.append(row)
                 else:
@@ -484,7 +573,21 @@ class BatchPDFProcessor:
                     })
             
             summary_df = pd.DataFrame(summary_data)
+            # Sort by File Name
+            summary_df = summary_df.sort_values('File Name')
             summary_df.to_excel(writer, sheet_name='Results', index=False)
+            
+            # Format the Results sheet with auto-filter and left-alignment
+            worksheet = writer.sheets['Results']
+            # Enable auto-filter
+            worksheet.auto_filter.ref = worksheet.dimensions
+            
+            # Apply left alignment to all cells, but disable text wrapping for subject/body columns
+            from openpyxl.styles import Alignment
+            left_align = Alignment(horizontal='left', vertical='top', wrap_text=False)
+            for row in worksheet.iter_rows():
+                for cell in row:
+                    cell.alignment = left_align
             
             # Detailed results sheet with one row per category prediction
             detailed_data = []
@@ -499,7 +602,7 @@ class BatchPDFProcessor:
                     
                     # Add one row per approach per category
                     for approach_name, approach_data in result['approaches'].items():
-                        approach_title = approach_name.replace("_", " ").title()
+                        approach_title = "RAG"  # Simplified approach name
                         
                         if approach_data.get('category_details'):
                             for cat_detail in approach_data['category_details']:
@@ -508,8 +611,7 @@ class BatchPDFProcessor:
                                     'Approach': approach_title,
                                     'Predicted Category': cat_detail.get('category', ''),
                                     'Confidence Score': cat_detail.get('confidence', 0.0),
-                                    'Provider Used': approach_data.get('provider_used', 'unknown'),
-                                    'Processing Time (s)': approach_data['processing_time']
+                                    'Processing Time (s)': f"{approach_data['processing_time']:.2f}"
                                 })
                                 detailed_data.append(detailed_row)
                         else:
@@ -519,14 +621,25 @@ class BatchPDFProcessor:
                                 'Approach': approach_title,
                                 'Predicted Category': 'No categories found',
                                 'Confidence Score': 0.0,
-                                'Provider Used': approach_data.get('provider_used', 'unknown'),
-                                'Processing Time (s)': approach_data['processing_time']
+                                'Processing Time (s)': f"{approach_data['processing_time']:.2f}"
                             })
                             detailed_data.append(detailed_row)
             
             if detailed_data:
                 detailed_df = pd.DataFrame(detailed_data)
+                # Sort by File Name
+                detailed_df = detailed_df.sort_values('File Name')
                 detailed_df.to_excel(writer, sheet_name='Detailed Results', index=False)
+                
+                # Format the Detailed Results sheet with auto-filter and left-alignment
+                detailed_worksheet = writer.sheets['Detailed Results']
+                # Enable auto-filter
+                detailed_worksheet.auto_filter.ref = detailed_worksheet.dimensions
+                
+                # Apply left alignment to all cells
+                for row in detailed_worksheet.iter_rows():
+                    for cell in row:
+                        cell.alignment = left_align
             
             # Overall metrics sheet if available
             if 'overall_metrics' in results:
@@ -534,12 +647,19 @@ class BatchPDFProcessor:
                 for approach_name, metrics in results['overall_metrics'].items():
                     metrics_data.append({
                         'Approach': approach_name.replace('_', ' ').title(),
-                        'Precision': metrics.get('precision', ''),
-                        'Recall': metrics.get('recall', ''),
-                        'F1 Score': metrics.get('f1_score', ''),
-                        'Accuracy': metrics.get('accuracy', ''),
                         'Total Files': metrics.get('total_files', ''),
-                        'Correct Predictions': metrics.get('correct_predictions', '')
+                        'Micro Precision': f"{metrics.get('micro_precision', 0):.4f}" if metrics.get('micro_precision') is not None else '',
+                        'Micro Recall': f"{metrics.get('micro_recall', 0):.4f}" if metrics.get('micro_recall') is not None else '',
+                        'Micro F1 Score': f"{metrics.get('micro_f1', 0):.4f}" if metrics.get('micro_f1') is not None else '',
+                        'Macro Precision': f"{metrics.get('macro_precision', 0):.4f}" if metrics.get('macro_precision') is not None else '',
+                        'Macro Recall': f"{metrics.get('macro_recall', 0):.4f}" if metrics.get('macro_recall') is not None else '',
+                        'Macro F1 Score': f"{metrics.get('macro_f1', 0):.4f}" if metrics.get('macro_f1') is not None else '',
+                        'Exact Match Accuracy': f"{metrics.get('exact_match_accuracy', 0):.4f}" if metrics.get('exact_match_accuracy') is not None else '',
+                        'Average Jaccard Similarity': f"{metrics.get('average_jaccard_similarity', 0):.4f}" if metrics.get('average_jaccard_similarity') is not None else '',
+                        'Perfect Predictions': metrics.get('perfect_predictions', ''),
+                        'Total True Positives': metrics.get('total_tp', ''),
+                        'Total False Positives': metrics.get('total_fp', ''),
+                        'Total False Negatives': metrics.get('total_fn', '')
                     })
                 
                 metrics_df = pd.DataFrame(metrics_data)

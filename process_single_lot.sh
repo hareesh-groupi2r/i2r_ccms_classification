@@ -86,19 +86,47 @@ get_lot_info() {
     # Determine lot directory based on lot number
     if [[ $lot_num -ge 21 && $lot_num -le 23 ]]; then
         lot_dir="$LOTS_BASE_DIR/Lot 21 to 23/LOT-$lot_num"
-        if [[ $lot_num -eq 21 ]]; then
-            ground_truth="$lot_dir/LOT-21.xlsx"
-        fi
     elif [[ $lot_num -ge 24 && $lot_num -le 27 ]]; then
         lot_dir="$LOTS_BASE_DIR/Lot 24 to 27/Lot $lot_num"
     else
-        error "Invalid lot number: $lot_num. Must be 21-27."
+        error "Invalid lot number: $lot_num. Must be 21-27." >&2
         exit 1
     fi
     
     if [[ ! -d "$lot_dir" ]]; then
-        error "Lot directory not found: $lot_dir"
+        error "Lot directory not found: $lot_dir" >&2
         exit 1
+    fi
+    
+    # Auto-detect ground truth Excel file in the lot directory
+    # Use null delimiter to handle filenames with spaces
+    local excel_count
+    excel_count=$(find "$lot_dir" -maxdepth 1 \( -name "*.xlsx" -o -name "*.xls" \) -print0 2>/dev/null | grep -c .)
+    
+    if [[ $excel_count -eq 1 ]]; then
+        # Exactly one Excel file found - use it as ground truth
+        ground_truth=$(find "$lot_dir" -maxdepth 1 \( -name "*.xlsx" -o -name "*.xls" \) -print 2>/dev/null)
+        info "📊 Auto-detected ground truth file: $(basename "$ground_truth")" >&2
+    elif [[ $excel_count -gt 1 ]]; then
+        # Multiple Excel files - apply pattern matching
+        local patterns=("EDMS*.xlsx" "LOT-*.xlsx" "*ground*truth*.xlsx" "*labels*.xlsx")
+        for pattern in "${patterns[@]}"; do
+            local match_count
+            match_count=$(find "$lot_dir" -maxdepth 1 -name "$pattern" -print0 2>/dev/null | grep -c .)
+            if [[ $match_count -eq 1 ]]; then
+                ground_truth=$(find "$lot_dir" -maxdepth 1 -name "$pattern" -print 2>/dev/null)
+                info "📊 Pattern-matched ground truth file: $(basename "$ground_truth")" >&2
+                break
+            fi
+        done
+        
+        # If no pattern match, use the first Excel file alphabetically
+        if [[ -z "$ground_truth" ]]; then
+            ground_truth=$(find "$lot_dir" -maxdepth 1 \( -name "*.xlsx" -o -name "*.xls" \) -print 2>/dev/null | head -1)
+            warn "⚠️  Multiple Excel files found, using first one: $(basename "$ground_truth")" >&2
+        fi
+    else
+        info "📊 No Excel files found in lot directory - will skip metrics" >&2
     fi
     
     echo "$lot_dir|$ground_truth"
@@ -178,6 +206,7 @@ def create_custom_batch_config(pdf_folder, ground_truth_file, enable_llm, enable
             },
             'evaluation': {
                 'enabled': enable_metrics,
+                # Set auto_detect to False when ground truth is explicitly provided
                 'auto_detect_ground_truth': ground_truth_file is None,
                 'ground_truth_patterns': ["EDMS*.xlsx", "LOT-*.xlsx", "ground_truth*.xlsx", "*_labels.xlsx"]
             },
@@ -232,11 +261,16 @@ def main():
         logger.info(f"📄 File Limit: First {args.limit} files")
     
     try:
-        # Check if ground truth file exists
-        if args.ground_truth and not Path(args.ground_truth).exists():
-            logger.warning(f"⚠️  Ground truth file not found: {args.ground_truth}")
-            logger.info(f"📊 Will attempt auto-detection in PDF folder")
-            args.ground_truth = None
+        # Check if ground truth file exists and validate it
+        if args.ground_truth:
+            if Path(args.ground_truth).exists():
+                logger.info(f"✅ Ground truth file verified: {args.ground_truth}")
+            else:
+                logger.warning(f"⚠️  Ground truth file not found: {args.ground_truth}")
+                logger.info(f"📊 Will attempt auto-detection in PDF folder")
+                args.ground_truth = None
+        else:
+            logger.info(f"📊 No ground truth file provided - will attempt auto-detection")
         
         # Get PDF files with optional limit
         pdf_files = get_pdf_files(args.pdf_folder, args.limit)
