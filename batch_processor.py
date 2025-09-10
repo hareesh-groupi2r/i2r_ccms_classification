@@ -320,6 +320,10 @@ class BatchPDFProcessor:
                 'correspondence_method': extraction_result['extraction_method']
             }
             
+            # Store extracted subject and body
+            result['subject'] = extraction_result['subject']
+            result['body'] = extraction_result['body']
+            
             # Process with each enabled approach
             for approach_name, classifier in self.classifiers.items():
                 logger.info(f"  🔍 Classifying with {approach_name.replace('_', ' ').title()} approach...")
@@ -328,11 +332,21 @@ class BatchPDFProcessor:
                 approach_result = classifier.classify(focused_content, is_file_path=False)
                 approach_time = time.time() - approach_start
                 
-                # Extract categories
-                categories = [cat.get('category', '') for cat in approach_result.get('categories', [])]
+                # Extract categories with confidence scores
+                categories = []
+                category_details = []
+                for cat_info in approach_result.get('categories', []):
+                    category = cat_info.get('category', '')
+                    confidence = cat_info.get('confidence', 0.0)
+                    categories.append(category)
+                    category_details.append({
+                        'category': category,
+                        'confidence': confidence
+                    })
                 
                 result['approaches'][approach_name] = {
                     'categories': categories,
+                    'category_details': category_details,  # Store detailed info with confidence
                     'processing_time': approach_time,
                     'provider_used': approach_result.get('llm_provider_used', approach_result.get('method_used', 'unknown')),
                     'full_result': approach_result
@@ -431,21 +445,35 @@ class BatchPDFProcessor:
                 if result['status'] == 'completed':
                     row = {
                         'File Name': result['file_name'],
+                        'Subject': result.get('subject', ''),
+                        'Body': result.get('body', ''),
                         'Processing Time (s)': result['processing_time'],
                         'Ground Truth': ', '.join(result.get('ground_truth', [])),
                     }
                     
                     # Add approach results
                     for approach_name, approach_data in result['approaches'].items():
-                        row[f'{approach_name.replace("_", " ").title()} Categories'] = ', '.join(approach_data['categories'])
-                        row[f'{approach_name.replace("_", " ").title()} Time (s)'] = approach_data['processing_time']
+                        approach_title = approach_name.replace("_", " ").title()
+                        
+                        # Categories and confidence scores
+                        categories_with_confidence = []
+                        for cat_detail in approach_data.get('category_details', []):
+                            cat = cat_detail.get('category', '')
+                            conf = cat_detail.get('confidence', 0.0)
+                            categories_with_confidence.append(f"{cat} ({conf:.3f})")
+                        
+                        row[f'{approach_title} Categories'] = ', '.join(approach_data['categories'])
+                        row[f'{approach_title} Categories with Confidence'] = ', '.join(categories_with_confidence)
+                        row[f'{approach_title} Time (s)'] = approach_data['processing_time']
+                        row[f'{approach_title} Provider'] = approach_data.get('provider_used', 'unknown')
                         
                         # Add metrics if available
                         if 'metrics' in approach_data:
                             metrics = approach_data['metrics']
-                            row[f'{approach_name.replace("_", " ").title()} Precision'] = metrics.get('precision', '')
-                            row[f'{approach_name.replace("_", " ").title()} Recall'] = metrics.get('recall', '')
-                            row[f'{approach_name.replace("_", " ").title()} F1'] = metrics.get('f1_score', '')
+                            row[f'{approach_title} Precision'] = metrics.get('precision', '')
+                            row[f'{approach_title} Recall'] = metrics.get('recall', '')
+                            row[f'{approach_title} F1'] = metrics.get('f1_score', '')
+                            row[f'{approach_title} Exact Match'] = metrics.get('exact_match', '')
                     
                     summary_data.append(row)
                 else:
@@ -456,7 +484,49 @@ class BatchPDFProcessor:
                     })
             
             summary_df = pd.DataFrame(summary_data)
-            summary_df.to_excel(writer, sheet_name='Summary', index=False)
+            summary_df.to_excel(writer, sheet_name='Results', index=False)
+            
+            # Detailed results sheet with one row per category prediction
+            detailed_data = []
+            for result in results['results']:
+                if result['status'] == 'completed':
+                    base_info = {
+                        'File Name': result['file_name'],
+                        'Subject': result.get('subject', ''),
+                        'Body': result.get('body', '')[:500] + '...' if len(result.get('body', '')) > 500 else result.get('body', ''),  # Truncate long bodies
+                        'Ground Truth': ', '.join(result.get('ground_truth', []))
+                    }
+                    
+                    # Add one row per approach per category
+                    for approach_name, approach_data in result['approaches'].items():
+                        approach_title = approach_name.replace("_", " ").title()
+                        
+                        if approach_data.get('category_details'):
+                            for cat_detail in approach_data['category_details']:
+                                detailed_row = base_info.copy()
+                                detailed_row.update({
+                                    'Approach': approach_title,
+                                    'Predicted Category': cat_detail.get('category', ''),
+                                    'Confidence Score': cat_detail.get('confidence', 0.0),
+                                    'Provider Used': approach_data.get('provider_used', 'unknown'),
+                                    'Processing Time (s)': approach_data['processing_time']
+                                })
+                                detailed_data.append(detailed_row)
+                        else:
+                            # No categories found
+                            detailed_row = base_info.copy()
+                            detailed_row.update({
+                                'Approach': approach_title,
+                                'Predicted Category': 'No categories found',
+                                'Confidence Score': 0.0,
+                                'Provider Used': approach_data.get('provider_used', 'unknown'),
+                                'Processing Time (s)': approach_data['processing_time']
+                            })
+                            detailed_data.append(detailed_row)
+            
+            if detailed_data:
+                detailed_df = pd.DataFrame(detailed_data)
+                detailed_df.to_excel(writer, sheet_name='Detailed Results', index=False)
             
             # Overall metrics sheet if available
             if 'overall_metrics' in results:
@@ -515,7 +585,7 @@ def process_lot_pdfs(pdf_folder: str,
             'evaluation': {
                 'enabled': enable_metrics,
                 'auto_detect_ground_truth': ground_truth_file is None,
-                'ground_truth_patterns': ["EDMS*.xlsx", "ground_truth*.xlsx", "*_labels.xlsx"]
+                'ground_truth_patterns': ["EDMS*.xlsx", "LOT-*.xlsx", "ground_truth*.xlsx", "*_labels.xlsx"]
             },
             'output': {
                 'results_folder': output_folder or 'results',

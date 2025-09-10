@@ -40,6 +40,7 @@ Options:
   --with-llm        Enable Pure LLM approach (slower but comprehensive)
   --no-metrics      Disable metrics calculation
   --output DIR      Custom output directory (default: results/LOT-XX)
+  --limit N         Process only first N files (default: all files)
   --help, -h        Show this help message
 
 Examples:
@@ -47,6 +48,7 @@ Examples:
   $0 24 --with-llm        # Process LOT-24 with Pure LLM enabled
   $0 22 --no-metrics      # Process LOT-22 without metrics
   $0 25 --output my_results/lot25  # Custom output directory
+  $0 21 --limit 5         # Process only first 5 files from LOT-21
 
 Available Lots:
 EOF
@@ -107,6 +109,7 @@ process_lot() {
     local enable_llm="$2"
     local enable_metrics="$3"
     local output_dir="$4"
+    local file_limit="$5"
     
     info "Getting lot information for LOT-$lot_num..."
     local lot_info
@@ -139,7 +142,7 @@ process_lot() {
         cat > "$SCRIPT_DIR/$PYTHON_SCRIPT" << 'PYTHON_EOF'
 #!/usr/bin/env python3
 """
-Batch processing script for individual lots
+Batch processing script for individual lots with custom file limiting
 """
 
 import sys
@@ -147,11 +150,13 @@ import os
 from pathlib import Path
 import argparse
 import logging
+import glob
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent))
 
-from batch_processor import process_lot_pdfs
+from batch_processor import BatchPDFProcessor
+import yaml
 
 # Configure logging
 logging.basicConfig(
@@ -159,6 +164,51 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+def create_custom_batch_config(pdf_folder, ground_truth_file, enable_llm, enable_metrics, limit_files):
+    """Create a custom batch configuration with proper ground truth handling."""
+    
+    # Create temporary batch config with explicit ground truth handling
+    config = {
+        'batch_processing': {
+            'enabled': True,
+            'approaches': {
+                'hybrid_rag': {'enabled': True, 'priority': 1},
+                'pure_llm': {'enabled': enable_llm, 'priority': 2}
+            },
+            'evaluation': {
+                'enabled': enable_metrics,
+                'auto_detect_ground_truth': ground_truth_file is None,
+                'ground_truth_patterns': ["EDMS*.xlsx", "LOT-*.xlsx", "ground_truth*.xlsx", "*_labels.xlsx"]
+            },
+            'output': {
+                'results_folder': 'results',
+                'save_format': 'xlsx'
+            },
+            'processing': {
+                'max_pages_per_pdf': 2,
+                'skip_on_error': True,
+                'rate_limit_delay': 1  # Reduced for testing
+            }
+        }
+    }
+    
+    # Add file limiting if specified
+    if limit_files:
+        config['batch_processing']['processing']['max_files'] = limit_files
+    
+    return config
+
+def get_pdf_files(pdf_folder, limit=None):
+    """Get list of PDF files, optionally limited to first N files."""
+    pdf_folder = Path(pdf_folder)
+    pdf_files = sorted(pdf_folder.glob("*.pdf"))
+    
+    if limit:
+        pdf_files = pdf_files[:limit]
+        logger.info(f"📄 Limited to first {limit} files out of {len(sorted(pdf_folder.glob('*.pdf')))} total")
+    
+    return pdf_files
 
 def main():
     parser = argparse.ArgumentParser(description='Process a lot of PDFs for classification')
@@ -168,6 +218,7 @@ def main():
     parser.add_argument('--lot-name', required=True, help='Name of the lot for logging')
     parser.add_argument('--enable-llm', action='store_true', help='Enable Pure LLM approach')
     parser.add_argument('--disable-metrics', action='store_true', help='Disable metrics calculation')
+    parser.add_argument('--limit', type=int, help='Process only first N files')
     
     args = parser.parse_args()
     
@@ -175,18 +226,84 @@ def main():
     logger.info(f"📁 PDF Folder: {args.pdf_folder}")
     logger.info(f"📊 Ground Truth: {args.ground_truth or 'Auto-detect'}")
     logger.info(f"📁 Output Folder: {args.output_folder}")
-    logger.info(f"🤖 LLM Approach: {'Enabled' if args.enable_llm else 'Disabled'}")
+    logger.info(f"🤖 LLM Approach: {'Enabled' if args.enable_llm else 'Disabled (Hybrid RAG only)'}")
     logger.info(f"📈 Metrics: {'Disabled' if args.disable_metrics else 'Enabled'}")
+    if args.limit:
+        logger.info(f"📄 File Limit: First {args.limit} files")
     
     try:
+        # Check if ground truth file exists
+        if args.ground_truth and not Path(args.ground_truth).exists():
+            logger.warning(f"⚠️  Ground truth file not found: {args.ground_truth}")
+            logger.info(f"📊 Will attempt auto-detection in PDF folder")
+            args.ground_truth = None
+        
+        # Get PDF files with optional limit
+        pdf_files = get_pdf_files(args.pdf_folder, args.limit)
+        if not pdf_files:
+            logger.error(f"❌ No PDF files found in {args.pdf_folder}")
+            return 1
+        
+        logger.info(f"📄 Found {len(pdf_files)} PDF files to process")
+        
+        # Create custom batch configuration
+        batch_config = create_custom_batch_config(
+            args.pdf_folder, 
+            args.ground_truth, 
+            args.enable_llm, 
+            not args.disable_metrics,
+            args.limit
+        )
+        
+        # Save temporary config
+        temp_config_path = Path("temp_single_lot_config.yaml")
+        with open(temp_config_path, 'w') as f:
+            yaml.dump(batch_config, f, default_flow_style=False)
+        
+        # Initialize batch processor with custom config
+        processor = BatchPDFProcessor(
+            config_path="config.yaml",
+            batch_config_path=str(temp_config_path)
+        )
+        
+        # Create a temporary folder with limited files if needed
+        actual_pdf_folder = args.pdf_folder
+        temp_folder = None
+        
+        if args.limit:
+            import shutil
+            temp_folder = Path(f"temp_limited_lot_{args.lot_name}")
+            temp_folder.mkdir(exist_ok=True)
+            
+            # Copy only the first N PDF files
+            pdf_files = get_pdf_files(args.pdf_folder, args.limit)
+            for pdf_file in pdf_files:
+                shutil.copy2(pdf_file, temp_folder / pdf_file.name)
+            
+            # Copy ground truth file if it exists in the original folder
+            if args.ground_truth and Path(args.ground_truth).exists():
+                shutil.copy2(args.ground_truth, temp_folder / Path(args.ground_truth).name)
+                args.ground_truth = str(temp_folder / Path(args.ground_truth).name)
+            
+            actual_pdf_folder = str(temp_folder)
+            logger.info(f"📄 Created temporary folder with {len(pdf_files)} files: {actual_pdf_folder}")
+        
         # Process the lot
-        results = process_lot_pdfs(
-            pdf_folder=args.pdf_folder,
+        logger.info(f"🔄 Processing {args.lot_name}...")
+        results = processor.process_pdf_folder(
+            pdf_folder=actual_pdf_folder,
             ground_truth_file=args.ground_truth,
-            enable_llm=args.enable_llm,
-            enable_metrics=not args.disable_metrics,
             output_folder=args.output_folder
         )
+        
+        # Clean up temporary folder if created
+        if temp_folder and temp_folder.exists():
+            shutil.rmtree(temp_folder)
+            logger.info(f"🧹 Cleaned up temporary folder")
+        
+        # Clean up temporary config
+        if temp_config_path.exists():
+            temp_config_path.unlink()
         
         # Log results summary
         stats = results.get('processing_stats', {})
@@ -196,8 +313,14 @@ def main():
         logger.info(f"   ❌ Failed: {stats.get('failed_files', 0)}")
         
         if 'overall_metrics' in results:
-            logger.info(f"   📊 Metrics available in results")
+            metrics = results['overall_metrics']
+            for approach, metric_data in metrics.items():
+                logger.info(f"   📊 {approach.replace('_', ' ').title()} Metrics:")
+                logger.info(f"      F1-Score: {metric_data.get('micro_f1', 'N/A'):.3f}")
+                logger.info(f"      Precision: {metric_data.get('micro_precision', 'N/A'):.3f}")
+                logger.info(f"      Recall: {metric_data.get('micro_recall', 'N/A'):.3f}")
         
+        logger.info(f"📁 Results saved to: {args.output_folder}")
         return 0
         
     except Exception as e:
@@ -234,6 +357,10 @@ PYTHON_EOF
             cmd="$cmd --disable-metrics"
         fi
         
+        if [[ -n "$file_limit" ]]; then
+            cmd="$cmd --limit $file_limit"
+        fi
+        
         # Execute processing
         info "Executing: $cmd"
         eval "$cmd"
@@ -256,6 +383,7 @@ main() {
     local enable_llm="false"
     local enable_metrics="true"
     local output_dir=""
+    local file_limit=""
     
     # Parse arguments
     while [[ $# -gt 0 ]]; do
@@ -278,6 +406,15 @@ main() {
                     shift 2
                 else
                     error "--output requires a directory argument"
+                    exit 1
+                fi
+                ;;
+            --limit)
+                if [[ -n "$2" && "$2" =~ ^[0-9]+$ ]]; then
+                    file_limit="$2"
+                    shift 2
+                else
+                    error "--limit requires a positive number"
                     exit 1
                 fi
                 ;;
@@ -322,7 +459,7 @@ main() {
     fi
     
     # Process the lot
-    process_lot "$lot_num" "$enable_llm" "$enable_metrics" "$output_dir"
+    process_lot "$lot_num" "$enable_llm" "$enable_metrics" "$output_dir" "$file_limit"
 }
 
 main "$@"
