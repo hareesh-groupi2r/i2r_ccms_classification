@@ -549,22 +549,22 @@ class BatchPDFProcessor:
                             conf = cat_detail.get('confidence', 0.0)
                             categories_with_confidence.append(f"{cat} ({conf:.3f})")
                         
-                        row['Categories'] = ', '.join(approach_data['categories'])
+                        row['Predicted Categories'] = ', '.join(approach_data['categories'])
                         row['Categories with Confidence'] = ', '.join(categories_with_confidence)
                         row['RAG Time (s)'] = f"{approach_data['processing_time']:.2f}"
                         
                         # Add metrics if available
                         if 'metrics' in approach_data:
                             metrics = approach_data['metrics']
-                            row['Precision'] = f"{metrics.get('precision', 0):.4f}" if metrics.get('precision') is not None else ''
-                            row['Recall'] = f"{metrics.get('recall', 0):.4f}" if metrics.get('recall') is not None else ''
-                            row['F1'] = f"{metrics.get('f1_score', 0):.4f}" if metrics.get('f1_score') is not None else ''
-                            row['Exact Match'] = f"{metrics.get('exact_match', 0):.4f}" if metrics.get('exact_match') is not None else ''
-                            row['True Positives'] = metrics.get('tp', '')
-                            row['False Positives'] = metrics.get('fp', '')
-                            row['False Negatives'] = metrics.get('fn', '')
+                            row['Precision'] = round(metrics.get('precision', 0), 2) if metrics.get('precision') is not None else None
+                            row['Recall'] = round(metrics.get('recall', 0), 2) if metrics.get('recall') is not None else None
+                            row['F1'] = round(metrics.get('f1_score', 0), 2) if metrics.get('f1_score') is not None else None
+                            row['Exact Match'] = round(metrics.get('exact_match', 0), 2) if metrics.get('exact_match') is not None else None
+                            row['True Positives'] = int(metrics.get('tp', 0)) if metrics.get('tp') is not None else None
+                            row['False Positives'] = int(metrics.get('fp', 0)) if metrics.get('fp') is not None else None
+                            row['False Negatives'] = int(metrics.get('fn', 0)) if metrics.get('fn') is not None else None
                             row['False Negatives List'] = ', '.join(metrics.get('missed_categories', [])) if metrics.get('missed_categories') else ''
-                            row['Jaccard Similarity'] = f"{metrics.get('jaccard_similarity', 0):.4f}" if metrics.get('jaccard_similarity') is not None else ''
+                            row['Jaccard Similarity'] = round(metrics.get('jaccard_similarity', 0), 2) if metrics.get('jaccard_similarity') is not None else None
                     
                     summary_data.append(row)
                 else:
@@ -667,23 +667,29 @@ class BatchPDFProcessor:
                 for approach_name, metrics in results['overall_metrics'].items():
                     metrics_data.append({
                         'Approach': approach_name.replace('_', ' ').title(),
-                        'Total Files': metrics.get('total_files', ''),
-                        'Micro Precision': f"{metrics.get('micro_precision', 0):.4f}" if metrics.get('micro_precision') is not None else '',
-                        'Micro Recall': f"{metrics.get('micro_recall', 0):.4f}" if metrics.get('micro_recall') is not None else '',
-                        'Micro F1 Score': f"{metrics.get('micro_f1', 0):.4f}" if metrics.get('micro_f1') is not None else '',
-                        'Macro Precision': f"{metrics.get('macro_precision', 0):.4f}" if metrics.get('macro_precision') is not None else '',
-                        'Macro Recall': f"{metrics.get('macro_recall', 0):.4f}" if metrics.get('macro_recall') is not None else '',
-                        'Macro F1 Score': f"{metrics.get('macro_f1', 0):.4f}" if metrics.get('macro_f1') is not None else '',
-                        'Exact Match Accuracy': f"{metrics.get('exact_match_accuracy', 0):.4f}" if metrics.get('exact_match_accuracy') is not None else '',
-                        'Average Jaccard Similarity': f"{metrics.get('average_jaccard_similarity', 0):.4f}" if metrics.get('average_jaccard_similarity') is not None else '',
-                        'Perfect Predictions': metrics.get('perfect_predictions', ''),
-                        'Total True Positives': metrics.get('total_tp', ''),
-                        'Total False Positives': metrics.get('total_fp', ''),
-                        'Total False Negatives': metrics.get('total_fn', '')
+                        'Total Files': int(metrics.get('total_files', 0)) if metrics.get('total_files') is not None else None,
+                        'Micro Precision': round(metrics.get('micro_precision', 0), 2) if metrics.get('micro_precision') is not None else None,
+                        'Micro Recall': round(metrics.get('micro_recall', 0), 2) if metrics.get('micro_recall') is not None else None,
+                        'Micro F1 Score': round(metrics.get('micro_f1', 0), 2) if metrics.get('micro_f1') is not None else None,
+                        'Macro Precision': round(metrics.get('macro_precision', 0), 2) if metrics.get('macro_precision') is not None else None,
+                        'Macro Recall': round(metrics.get('macro_recall', 0), 2) if metrics.get('macro_recall') is not None else None,
+                        'Macro F1 Score': round(metrics.get('macro_f1', 0), 2) if metrics.get('macro_f1') is not None else None,
+                        'Exact Match Accuracy': round(metrics.get('exact_match_accuracy', 0), 2) if metrics.get('exact_match_accuracy') is not None else None,
+                        'Average Jaccard Similarity': round(metrics.get('average_jaccard_similarity', 0), 2) if metrics.get('average_jaccard_similarity') is not None else None,
+                        'Perfect Predictions': int(metrics.get('perfect_predictions', 0)) if metrics.get('perfect_predictions') is not None else None,
+                        'Total True Positives': int(metrics.get('total_tp', 0)) if metrics.get('total_tp') is not None else None,
+                        'Total False Positives': int(metrics.get('total_fp', 0)) if metrics.get('total_fp') is not None else None,
+                        'Total False Negatives': int(metrics.get('total_fn', 0)) if metrics.get('total_fn') is not None else None
                     })
                 
                 metrics_df = pd.DataFrame(metrics_data)
                 metrics_df.to_excel(writer, sheet_name='Overall Metrics', index=False)
+                
+                # Format the Overall Metrics sheet with left-alignment
+                metrics_worksheet = writer.sheets['Overall Metrics']
+                for row in metrics_worksheet.iter_rows():
+                    for cell in row:
+                        cell.alignment = left_align
             
             # Processing stats sheet
             stats_data = [{
@@ -693,6 +699,12 @@ class BatchPDFProcessor:
             
             stats_df = pd.DataFrame(stats_data)
             stats_df.to_excel(writer, sheet_name='Processing Stats', index=False)
+            
+            # Format the Processing Stats sheet with left-alignment
+            stats_worksheet = writer.sheets['Processing Stats']
+            for row in stats_worksheet.iter_rows():
+                for cell in row:
+                    cell.alignment = left_align
 
 
 # Convenience functions for easy usage
