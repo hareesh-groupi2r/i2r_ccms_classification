@@ -1,0 +1,176 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+
+# Translations
+*.mo
+*.pot
+
+# Django stuff:
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+
+# Flask stuff:
+instance/
+.webassets-cache
+
+# Scrapy stuff:
+.scrapy
+
+# Sphinx documentation
+docs/_build/
+
+# PyBuilder
+target/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IPython
+profile_default/
+ipython_config.py
+
+# pyenv
+.python-version
+
+# pipenv
+Pipfile.lock
+
+# PEP 582
+__pypackages__/
+
+# Celery stuff
+celerybeat-schedule
+celerybeat.pid
+
+# SageMath parsed files
+*.sage.py
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Spyder project settings
+.spyderproject
+.spyproject
+
+# Rope project settings
+.ropeproject
+
+# mkdocs documentation
+/site
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre type checker
+.pyre/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Project specific files
+# Data directories
+data/Lots21-27/
+data/Lot-11/
+data/raw/
+data/reports/
+data/Lots21-27.zip
+data/all_lots_vertex_MASTER(in).csv
+data/all_lots_vertex_MASTER.txt
+
+# Logs and temporary files
+logs/
+api_logs.txt
+full_batch.log
+*.log
+
+# Results and output directories
+results/
+classification_results_Lots21-27/
+
+# Test and debug files
+debug_ground_truth.sh
+test_fixed_function.sh
+test_get_lot_info.sh
+test_ground_truth.sh
+test_others_filter.py
+test_results_pure_llm.json
+simple_evaluation_results.json
+data_sufficiency_report.json
+
+# Configuration files (keep templates, ignore actual configs with secrets)
+production_config.yaml
+
+# Documentation artifacts
+prompt_for_classification.md.rtf
+prompt_to_make_classification-as-another-service.rtf
+classinfication_cheatsheet.md
+
+# Processing scripts (project-specific)
+process_batch_lots.py
