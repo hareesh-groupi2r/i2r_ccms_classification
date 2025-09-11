@@ -224,18 +224,30 @@ class IssueCategoryMapper:
                 
                 category_scores[category]['sources'].append({
                     'issue_type': issue_type,
-                    'confidence': combined_confidence
+                    'confidence': combined_confidence,
+                    'evidence': issue.get('evidence', ''),  # Pass through evidence from RAG lookup
+                    'source': issue.get('source', 'unknown')  # Pass through source info
                 })
         
         # Convert to list format
-        results = [
-            {
+        results = []
+        for category, data in category_scores.items():
+            # Collect evidence from all source issues for this category
+            evidence_list = []
+            issue_types_list = []
+            for source in data['sources']:
+                if source.get('evidence'):
+                    evidence_list.append(source['evidence'])
+                if source.get('issue_type'):
+                    issue_types_list.append(source['issue_type'])
+            
+            results.append({
                 'category': category,
                 'confidence': data['confidence'],
-                'source_issues': data['sources']
-            }
-            for category, data in category_scores.items()
-        ]
+                'source_issues': data['sources'],
+                'evidence': '; '.join(evidence_list) if evidence_list else '',  # Combine evidence from all sources
+                'issue_types': list(set(issue_types_list))  # Unique issue types that led to this category
+            })
         
         return sorted(results, key=lambda x: x['confidence'], reverse=True)
     

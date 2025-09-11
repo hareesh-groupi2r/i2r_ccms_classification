@@ -413,7 +413,9 @@ class BatchPDFProcessor:
                         categories.append(category)
                         category_details.append({
                             'category': category,
-                            'confidence': confidence
+                            'confidence': confidence,
+                            'evidence': cat_info.get('evidence', ''),  # RAG lookup evidence/justification
+                            'issue_types': cat_info.get('issue_types', [])  # Issue types that led to this category
                         })
                     else:
                         logger.debug(f"Filtered out low confidence category '{category}' ({confidence:.3f} < {confidence_threshold})")
@@ -607,10 +609,26 @@ class BatchPDFProcessor:
                         if approach_data.get('category_details'):
                             for cat_detail in approach_data['category_details']:
                                 detailed_row = base_info.copy()
+                                
+                                # Get evidence from RAG lookup as justification, truncate if too long
+                                evidence = cat_detail.get('evidence', 'No supporting evidence found in RAG lookup')
+                                # Truncate long evidence and show only the first sentence or first 150 characters
+                                if evidence and len(evidence) > 150:
+                                    sentences = evidence.split('. ')
+                                    justification = sentences[0] + ('.' if len(sentences[0]) < len(evidence) else '') + '...'
+                                else:
+                                    justification = evidence
+                                
+                                # Get issue types that led to this category
+                                issue_types = cat_detail.get('issue_types', [])
+                                issue_types_str = ', '.join(issue_types) if issue_types else 'No issue types found'
+                                
                                 detailed_row.update({
                                     'Approach': approach_title,
                                     'Predicted Category': cat_detail.get('category', ''),
                                     'Confidence Score': cat_detail.get('confidence', 0.0),
+                                    'Issue Types': issue_types_str,
+                                    'Justification': justification,
                                     'Processing Time (s)': f"{approach_data['processing_time']:.2f}"
                                 })
                                 detailed_data.append(detailed_row)
@@ -621,6 +639,8 @@ class BatchPDFProcessor:
                                 'Approach': approach_title,
                                 'Predicted Category': 'No categories found',
                                 'Confidence Score': 0.0,
+                                'Issue Types': 'N/A',
+                                'Justification': 'No categories were predicted above the confidence threshold',
                                 'Processing Time (s)': f"{approach_data['processing_time']:.2f}"
                             })
                             detailed_data.append(detailed_row)
