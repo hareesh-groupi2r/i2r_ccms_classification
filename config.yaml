@@ -12,11 +12,21 @@ approaches:
   hybrid_rag:
     enabled: true  # Recommended to keep enabled for better performance
     embedding_model: "all-mpnet-base-v2"
-    llm_model: "claude-sonnet-4-20250514"  # Use Anthropic instead of OpenAI
+    llm_model: "claude-sonnet-4-20250514"  # Use Anthropic (will test error handling)
     vector_db: "faiss"  # Options: faiss, pinecone, qdrant
-    top_k: 15
-    window_size: 3
-    overlap: 1
+    top_k: 12             # Increase for better recall coverage
+    window_size: 3        # Increase back for better context matching
+    overlap: 1            # Restore overlap for better issue detection
+    similarity_threshold: 0.20  # Very low threshold for maximum recall
+    max_issues: 10        # Increase significantly to capture more valid issues
+    document_context_chars: 2500  # More context for LLM
+    confidence_decay: 0.03 # Further reduce ranking penalty
+    min_llm_confidence: 0.1  # Very low LLM threshold to capture File 19 issues
+    
+    # Confidence-based filtering for high precision
+    enable_confidence_filtering: true
+    confidence_divergence_threshold: 0.15  # Minimum gap between TP and FP confidence
+    top_percentage_filter: 0.20  # Only keep top 20% when divergence detected
     
   legalbert:
     enabled: false  # Enable after model training

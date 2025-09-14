@@ -24,6 +24,7 @@ from classifier.pdf_extractor import PDFExtractor
 from classifier.category_normalizer import CategoryNormalizer
 from extract_correspondence_content import CorrespondenceExtractor
 from metrics_calculator import MetricsCalculator
+from unified_pdf_processor import UnifiedPDFProcessor
 
 logger = logging.getLogger(__name__)
 
@@ -167,6 +168,16 @@ class BatchPDFProcessor:
             raise ValueError("No classifiers enabled! Please enable at least one approach.")
         
         logger.info(f"🚀 Initialized {len(self.classifiers)} classifiers: {list(self.classifiers.keys())}")
+        
+        # Initialize unified processor for consistent pipeline
+        try:
+            self.unified_processor = UnifiedPDFProcessor(config_path, batch_config_path)
+            self.use_unified_pipeline = True
+            logger.info("✅ Unified processor backend initialized")
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to initialize unified processor: {e}")
+            self.unified_processor = None
+            self.use_unified_pipeline = False
     
     def process_pdf_folder(self, 
                           pdf_folder: str, 
@@ -399,10 +410,31 @@ class BatchPDFProcessor:
                 approach_result = classifier.classify(focused_content, is_file_path=False)
                 approach_time = time.time() - approach_start
                 
+                # Check if classification failed due to LLM error
+                if approach_result.get('status') == 'error' and approach_result.get('error_type') == 'llm_validation_failed':
+                    # Handle LLM validation failure - report error instead of unreliable results
+                    error_msg = f"❌ LLM Validation Failed ({approach_result.get('provider', 'Unknown')}): {approach_result.get('message', 'Unknown error')}"
+                    logger.error(error_msg)
+                    
+                    result['approaches'][approach_name] = {
+                        'status': 'llm_validation_failed',
+                        'error_message': approach_result.get('message', 'LLM validation failed'),
+                        'error_provider': approach_result.get('provider', 'unknown'),
+                        'raw_semantic_results_count': approach_result.get('raw_semantic_results_count', 0),
+                        'processing_time': approach_time,
+                        'categories': [],  # No categories due to validation failure
+                        'category_details': [],
+                        'error_details': approach_result.get('error_details', {}),
+                        'full_result': approach_result
+                    }
+                    
+                    logger.info(f"    ❌ {approach_name.replace('_', ' ').title()}: {approach_time:.2f}s - LLM VALIDATION FAILED ({approach_result.get('provider', 'Unknown')})")
+                    continue  # Skip to next approach
+                
                 # Extract categories with confidence scores, filtering by confidence threshold
                 categories = []
                 category_details = []
-                confidence_threshold = 0.5
+                confidence_threshold = 0.2  # Much lower threshold for better recall
                 
                 for cat_info in approach_result.get('categories', []):
                     category = cat_info.get('category', '')
@@ -423,6 +455,7 @@ class BatchPDFProcessor:
                 logger.info(f"    Kept {len(categories)} categories above {confidence_threshold} confidence threshold")
                 
                 result['approaches'][approach_name] = {
+                    'status': 'success',
                     'categories': categories,
                     'category_details': category_details,  # Store detailed info with confidence
                     'processing_time': approach_time,
@@ -498,6 +531,117 @@ class BatchPDFProcessor:
         
         return final_results
     
+    def process_pdf_folder_unified(self, 
+                                  pdf_folder: str, 
+                                  ground_truth_file: str = None,
+                                  output_folder: str = None,
+                                  use_unified_pipeline: bool = True) -> Dict:
+        """
+        Process all PDFs in a folder using unified pipeline for consistency.
+        
+        Args:
+            pdf_folder: Path to folder containing PDF files
+            ground_truth_file: Optional path to ground truth Excel file
+            output_folder: Optional custom output folder
+            use_unified_pipeline: Whether to use unified processor backend
+            
+        Returns:
+            Dictionary containing processing results and metrics
+        """
+        if use_unified_pipeline and self.unified_processor:
+            logger.info("🔄 Using unified processing pipeline for batch processing")
+            
+            # Extract configuration for unified processor
+            batch_approaches = self.batch_config['batch_processing']['approaches']
+            enabled_approaches = []
+            for approach, config in batch_approaches.items():
+                if config.get('enabled', False):
+                    enabled_approaches.append(approach)
+            
+            processing_config = self.batch_config['batch_processing']['processing']
+            confidence_threshold = processing_config.get('confidence_threshold', 0.3)
+            max_pages = processing_config.get('max_pages_per_pdf', 2)
+            
+            # Use unified processor
+            unified_results = self.unified_processor.process_batch_pdfs(
+                pdf_folder=pdf_folder,
+                approaches=enabled_approaches,
+                confidence_threshold=confidence_threshold,
+                max_pages=max_pages,
+                ground_truth_file=ground_truth_file,
+                output_folder=output_folder or self.batch_config['batch_processing']['output']['results_folder']
+            )
+            
+            # Convert unified results to legacy format for backward compatibility
+            return self._convert_unified_to_legacy_format(unified_results)
+        else:
+            logger.info("🔄 Using legacy processing pipeline")
+            return self.process_pdf_folder(pdf_folder, ground_truth_file, output_folder)
+    
+    def _convert_unified_to_legacy_format(self, unified_results: Dict) -> Dict:
+        """Convert unified results format to legacy BatchPDFProcessor format."""
+        legacy_results = {
+            'processing_stats': {
+                'total_files': unified_results['total_files'],
+                'processed_files': unified_results['processed_files'],
+                'failed_files': unified_results['failed_files'],
+                'start_time': unified_results['processing_stats']['start_time'],
+                'end_time': unified_results['processing_stats']['end_time']
+            },
+            'config': {
+                'batch_config': self.batch_config,
+                'enabled_approaches': unified_results['configuration']['approaches']
+            },
+            'results': []
+        }
+        
+        # Convert each result
+        for unified_result in unified_results['results']:
+            if unified_result['status'] == 'completed':
+                # Convert unified result to legacy format
+                legacy_result = {
+                    'file_name': unified_result['file_name'],
+                    'file_path': unified_result['file_path'],
+                    'status': 'completed',
+                    'processing_time': unified_result['processing_time'],
+                    'approaches': {},
+                    'subject': unified_result.get('extraction_info', {}).get('subject', ''),
+                    'body': unified_result.get('extraction_info', {}).get('body', ''),
+                    'text_info': unified_result.get('extraction_info', {})
+                }
+                
+                # Convert approach results
+                for approach_name, approach_data in unified_result.get('approaches', {}).items():
+                    if approach_data.get('status') == 'success':
+                        legacy_result['approaches'][approach_name] = {
+                            'status': 'success',
+                            'categories': [cat['category'] for cat in approach_data.get('categories', [])],
+                            'category_details': approach_data.get('categories', []),
+                            'processing_time': approach_data.get('processing_time', 0),
+                            'provider_used': approach_data.get('provider_used', 'unknown'),
+                            'full_result': approach_data.get('full_result', {})
+                        }
+                    else:
+                        legacy_result['approaches'][approach_name] = {
+                            'status': approach_data.get('error_type', 'error'),
+                            'error_message': approach_data.get('error_message', 'Unknown error'),
+                            'processing_time': approach_data.get('processing_time', 0),
+                            'categories': [],
+                            'category_details': []
+                        }
+                
+                legacy_results['results'].append(legacy_result)
+            else:
+                # Failed result
+                legacy_results['results'].append({
+                    'file_name': unified_result['file_name'],
+                    'status': 'failed',
+                    'error': unified_result.get('error', 'Unknown error'),
+                    'approaches': {}
+                })
+        
+        return legacy_results
+    
     def _calculate_overall_metrics(self, ground_truth: Dict) -> Dict:
         """Calculate overall metrics across all files and approaches, excluding 'Others' category."""
         overall_metrics = {}
@@ -542,16 +686,39 @@ class BatchPDFProcessor:
                     for approach_name, approach_data in result['approaches'].items():
                         approach_title = approach_name.replace("_", " ").title()
                         
-                        # Categories and confidence scores
-                        categories_with_confidence = []
-                        for cat_detail in approach_data.get('category_details', []):
-                            cat = cat_detail.get('category', '')
-                            conf = cat_detail.get('confidence', 0.0)
-                            categories_with_confidence.append(f"{cat} ({conf:.3f})")
-                        
-                        row['Predicted Categories'] = ', '.join(approach_data['categories'])
-                        row['Categories with Confidence'] = ', '.join(categories_with_confidence)
-                        row['RAG Time (s)'] = f"{approach_data['processing_time']:.2f}"
+                        # Check if this approach failed due to LLM validation error
+                        if approach_data.get('status') == 'llm_validation_failed':
+                            # Handle LLM validation failure in summary
+                            provider = approach_data.get('error_provider', 'Unknown')
+                            raw_results = approach_data.get('raw_semantic_results_count', 0)
+                            
+                            row['Predicted Categories'] = f'ERROR: LLM Validation Failed ({provider})'
+                            row['Categories with Confidence'] = f'Found {raw_results} semantic results but LLM validation failed'
+                            row['RAG Time (s)'] = f"{approach_data['processing_time']:.2f}"
+                        else:
+                            # Normal processing - Categories and confidence scores
+                            categories_with_confidence = []
+                            for cat_detail in approach_data.get('category_details', []):
+                                cat = cat_detail.get('category', '')
+                                conf = cat_detail.get('confidence', 0.0)
+                                
+                                # Try to get original LLM confidence if available
+                                original_conf = None
+                                if 'full_result' in approach_data and 'identified_issues' in approach_data['full_result']:
+                                    for issue in approach_data['full_result']['identified_issues']:
+                                        if issue.get('source') == 'llm_validation':
+                                            original_conf = issue.get('original_confidence', None)
+                                            break
+                                
+                                # Format confidence display
+                                if original_conf and original_conf != conf:
+                                    categories_with_confidence.append(f"{cat} ({conf:.3f}, LLM: {original_conf:.3f})")
+                                else:
+                                    categories_with_confidence.append(f"{cat} ({conf:.3f})")
+                            
+                            row['Predicted Categories'] = ', '.join(approach_data['categories'])
+                            row['Categories with Confidence'] = ', '.join(categories_with_confidence)
+                            row['RAG Time (s)'] = f"{approach_data['processing_time']:.2f}"
                         
                         # Add metrics if available
                         if 'metrics' in approach_data:
@@ -606,7 +773,25 @@ class BatchPDFProcessor:
                     for approach_name, approach_data in result['approaches'].items():
                         approach_title = "RAG"  # Simplified approach name
                         
-                        if approach_data.get('category_details'):
+                        # Check if this approach failed due to LLM validation error
+                        if approach_data.get('status') == 'llm_validation_failed':
+                            # Handle LLM validation failure
+                            detailed_row = base_info.copy()
+                            error_msg = approach_data.get('error_message', 'LLM validation failed')
+                            provider = approach_data.get('error_provider', 'Unknown')
+                            raw_results = approach_data.get('raw_semantic_results_count', 0)
+                            
+                            detailed_row.update({
+                                'Approach': approach_title,
+                                'Predicted Category': 'ERROR: LLM Validation Failed',
+                                'Confidence Score': 0.0,
+                                'Issue Types': f'LLM Error ({provider})',
+                                'Justification': f'LLM validation failed for {provider}. Found {raw_results} semantic results but could not validate. Error: {error_msg[:200]}...' if len(error_msg) > 200 else f'LLM validation failed for {provider}. Found {raw_results} semantic results but could not validate. Error: {error_msg}',
+                                'Processing Time (s)': f"{approach_data['processing_time']:.2f}"
+                            })
+                            detailed_data.append(detailed_row)
+                            
+                        elif approach_data.get('category_details'):
                             for cat_detail in approach_data['category_details']:
                                 detailed_row = base_info.copy()
                                 
@@ -623,17 +808,28 @@ class BatchPDFProcessor:
                                 issue_types = cat_detail.get('issue_types', [])
                                 issue_types_str = ', '.join(issue_types) if issue_types else 'No issue types found'
                                 
+                                # Try to get original LLM confidence if available
+                                original_conf = None
+                                llm_confidence_note = ''
+                                if 'full_result' in approach_data and 'identified_issues' in approach_data['full_result']:
+                                    for issue in approach_data['full_result']['identified_issues']:
+                                        if issue.get('source') == 'llm_validation':
+                                            original_conf = issue.get('original_confidence', None)
+                                            if original_conf and original_conf != cat_detail.get('confidence', 0.0):
+                                                llm_confidence_note = f" (Original LLM: {original_conf:.3f})"
+                                            break
+                                
                                 detailed_row.update({
                                     'Approach': approach_title,
                                     'Predicted Category': cat_detail.get('category', ''),
-                                    'Confidence Score': cat_detail.get('confidence', 0.0),
+                                    'Confidence Score': f"{cat_detail.get('confidence', 0.0):.3f}{llm_confidence_note}",
                                     'Issue Types': issue_types_str,
                                     'Justification': justification,
                                     'Processing Time (s)': f"{approach_data['processing_time']:.2f}"
                                 })
                                 detailed_data.append(detailed_row)
                         else:
-                            # No categories found
+                            # No categories found (but no error)
                             detailed_row = base_info.copy()
                             detailed_row.update({
                                 'Approach': approach_title,
@@ -705,6 +901,48 @@ class BatchPDFProcessor:
             for row in stats_worksheet.iter_rows():
                 for cell in row:
                     cell.alignment = left_align
+            
+            # NEW: Chunk Data Review sheet for debugging
+            chunk_debug_data = []
+            for result in results['results']:
+                if result['status'] == 'completed':
+                    for approach_name, approach_data in result['approaches'].items():
+                        # Extract chunk debug data if available
+                        chunk_data = approach_data.get('chunk_debug_data', [])
+                        for chunk in chunk_data:
+                            chunk_debug_data.append({
+                                'File Name': result['file_name'],
+                                'Approach': approach_name.replace('_', ' ').title(),
+                                'Chunk ID': chunk.get('chunk_id', ''),
+                                'Chunk Length (chars)': chunk.get('chunk_length', 0),
+                                'Start Position': chunk.get('start_pos', 0),
+                                'End Position': chunk.get('end_pos', 0),
+                                'Chunk Text Preview': chunk.get('chunk_text', ''),
+                                'Search Results Count': chunk.get('search_results_count', 0),
+                                'Unique Issues Found': chunk.get('unique_issues_found', 0),
+                                'Issues List': chunk.get('issues_list', ''),
+                                'Top 3 Similarities': ', '.join([f'{sim:.3f}' for sim in chunk.get('top_similarities', [])]),
+                                'Average Similarity': f"{chunk.get('avg_similarity', 0):.3f}"
+                            })
+            
+            if chunk_debug_data:
+                chunk_df = pd.DataFrame(chunk_debug_data)
+                # Sort by File Name, then Chunk ID
+                chunk_df = chunk_df.sort_values(['File Name', 'Chunk ID'])
+                chunk_df.to_excel(writer, sheet_name='Chunk_Data_Review', index=False)
+                
+                # Format the Chunk Data Review sheet
+                chunk_worksheet = writer.sheets['Chunk_Data_Review']
+                # Enable auto-filter
+                chunk_worksheet.auto_filter.ref = chunk_worksheet.dimensions
+                # Apply left alignment
+                for row in chunk_worksheet.iter_rows():
+                    for cell in row:
+                        cell.alignment = left_align
+                
+                logger.info(f"📊 Chunk debug data saved: {len(chunk_debug_data)} chunk entries across {len(set(d['File Name'] for d in chunk_debug_data))} files")
+            else:
+                logger.info("ℹ️ No chunk debug data available (only available with hybrid_rag approach)")
 
 
 # Convenience functions for easy usage
@@ -757,9 +995,9 @@ def process_lot_pdfs(pdf_folder: str,
         yaml.dump(temp_config, f)
     
     try:
-        # Process with temporary config
+        # Process with temporary config using unified pipeline
         processor = BatchPDFProcessor(batch_config_path=str(temp_config_path))
-        return processor.process_pdf_folder(pdf_folder, ground_truth_file, output_folder)
+        return processor.process_pdf_folder_unified(pdf_folder, ground_truth_file, output_folder, use_unified_pipeline=True)
     finally:
         # Cleanup temporary config
         if temp_config_path.exists():
