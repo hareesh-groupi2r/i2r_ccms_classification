@@ -27,6 +27,10 @@ import sys
 project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
+# Import batch processor components for ground truth handling
+from classifier.category_normalizer import CategoryNormalizer
+from metrics_calculator import MetricsCalculator
+
 
 # Create Blueprint
 service_api = Blueprint('service_api', __name__, url_prefix='/api/services')
@@ -39,6 +43,10 @@ llm_service = LLMService(config_service)
 category_mapping_service = CategoryMappingService(config_service)
 classification_service = get_classification_service(config_service)
 orchestrator = DocumentProcessingOrchestrator(config_service)
+
+# Initialize batch processor components for ground truth handling
+category_normalizer = CategoryNormalizer(strict_mode=False)
+metrics_calculator = MetricsCalculator()
 
 # Helper functions
 def allowed_file(filename: str) -> bool:
@@ -85,6 +93,186 @@ def cleanup_temp_file(file_path: str):
         temp_dir.rmdir()
     except Exception as e:
         print(f"Warning: Could not clean up temp file {file_path}: {e}")
+
+def setup_per_file_logger(pdf_file_name: str, output_folder: str):
+    """Setup individual logger for each PDF file"""
+    import logging
+    import os
+    
+    # Create safe filename for log
+    safe_filename = "".join(c for c in pdf_file_name if c.isalnum() or c in "._- ").rstrip()
+    log_filename = f"{safe_filename}.log"
+    log_path = os.path.join(output_folder, log_filename)
+    
+    # Ensure output folder exists
+    os.makedirs(output_folder, exist_ok=True)
+    
+    # Create unique logger name for this file
+    logger_name = f"pdf_file_{safe_filename}"
+    file_logger = logging.getLogger(logger_name)
+    
+    # Remove any existing handlers to avoid duplicates
+    for handler in file_logger.handlers[:]:
+        file_logger.removeHandler(handler)
+    
+    # Create file handler
+    file_handler = logging.FileHandler(log_path, mode='w', encoding='utf-8')
+    file_handler.setLevel(logging.INFO)
+    
+    # Create formatter
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    file_handler.setFormatter(formatter)
+    
+    # Add handler to logger
+    file_logger.addHandler(file_handler)
+    file_logger.setLevel(logging.INFO)
+    file_logger.propagate = True  # Still send to main logger
+    
+    return file_logger, log_path
+
+def cleanup_per_file_logger(file_logger):
+    """Clean up file logger handlers"""
+    if file_logger:
+        for handler in file_logger.handlers[:]:
+            handler.close()
+            file_logger.removeHandler(handler)
+
+def dual_log(main_logger, file_logger, level, message):
+    """Log to both main logger and file logger if file_logger exists"""
+    # Always log to main logger
+    if level == 'info':
+        main_logger.info(message)
+    elif level == 'warning':
+        main_logger.warning(message)
+    elif level == 'error':
+        main_logger.error(message)
+    elif level == 'debug':
+        main_logger.debug(message)
+    
+    # Also log to file logger if it exists
+    if file_logger:
+        if level == 'info':
+            file_logger.info(message)
+        elif level == 'warning':
+            file_logger.warning(message)
+        elif level == 'error':
+            file_logger.error(message)
+        elif level == 'debug':
+            file_logger.debug(message)
+
+def _auto_detect_ground_truth(pdf_folder: str) -> str:
+    """Auto-detect ground truth file in PDF folder - from batch processor"""
+    pdf_folder = Path(pdf_folder)
+    
+    # Common patterns for ground truth files
+    patterns = ["EDMS*.xlsx", "LOT-*.xlsx", "*ground_truth*.xlsx", "*_labels.xlsx", "*.xlsx", "*.xls"]
+    
+    for pattern in patterns:
+        ground_truth_files = list(pdf_folder.glob(pattern))
+        if ground_truth_files:
+            # Prefer files with recognizable patterns first
+            for ground_truth_file in ground_truth_files:
+                if any(keyword in ground_truth_file.name.lower() 
+                      for keyword in ['edms', 'lot', 'ground', 'truth', 'label']):
+                    logger.info(f"📊 Auto-detected ground truth: {ground_truth_file.name}")
+                    return str(ground_truth_file)
+            
+            # If no keyword match, use first file
+            logger.info(f"📊 Using Excel file as ground truth: {ground_truth_files[0].name}")
+            return str(ground_truth_files[0])
+    
+    logger.info("📊 No ground truth file auto-detected")
+    return None
+
+def _load_ground_truth(ground_truth_file: str) -> Dict:
+    """Load ground truth from Excel file - complete batch processor version"""
+    import pandas as pd
+    try:
+        df = pd.read_excel(ground_truth_file)
+        
+        # Auto-detect the format and find the correct columns
+        ground_truth = {}
+        
+        # Check if this looks like the LOT-21 format (has "Sr. No" in first data row)
+        if len(df) > 1 and str(df.iloc[1, 0]).strip() == "Sr. No":
+            logger.info("📊 Detected LOT-21 ground truth format")
+            # LOT-21 format: skip first 2 rows (headers), file name in column 2, categories in column 5
+            
+            for idx in range(2, len(df)):
+                row = df.iloc[idx]
+                
+                # File name is in column 2, add .pdf extension if missing
+                file_name_raw = str(row.iloc[2]) if pd.notna(row.iloc[2]) else ""
+                if not file_name_raw or file_name_raw.strip() in ["", "nan"]:
+                    continue
+                
+                file_name = file_name_raw.strip()
+                if not file_name.lower().endswith('.pdf'):
+                    file_name = file_name + '.pdf'
+                
+                # Categories are in column 5, comma-separated
+                categories_raw = str(row.iloc[5]) if pd.notna(row.iloc[5]) else ""
+                
+                if categories_raw and categories_raw.strip() not in ["", "nan"]:
+                    # Use the CategoryNormalizer to parse and normalize categories
+                    normalized_categories = category_normalizer.parse_and_normalize_categories(categories_raw)
+                    
+                    # Consolidate categories for the same file
+                    if file_name in ground_truth:
+                        # Add new categories to existing ones, avoiding duplicates
+                        for cat in normalized_categories:
+                            if cat not in ground_truth[file_name]:
+                                ground_truth[file_name].append(cat)
+                    else:
+                        # First occurrence of this file
+                        ground_truth[file_name] = normalized_categories
+
+        else:
+            # Generic format: first column is file name, remaining columns are categories  
+            logger.info("📊 Using generic ground truth format")
+            for _, row in df.iterrows():
+                file_name = str(row.iloc[0])  # First column is file name
+                if not file_name or file_name.strip() in ["", "nan"]:
+                    continue
+                    
+                raw_categories = []
+                # Collect non-empty categories from remaining columns
+                for col_idx in range(1, len(row)):
+                    if pd.notna(row.iloc[col_idx]) and str(row.iloc[col_idx]).strip():
+                        cat = str(row.iloc[col_idx]).strip()
+                        if cat not in ["", "nan"]:
+                            raw_categories.append(cat)
+                
+                # Normalize categories using CategoryNormalizer
+                normalized_categories = []
+                for cat in raw_categories:
+                    norm_cat, status, confidence = category_normalizer.normalize_category(cat)
+                    if norm_cat and norm_cat not in normalized_categories:
+                        normalized_categories.append(norm_cat)
+                
+                # Consolidate categories for the same file
+                if file_name in ground_truth:
+                    # Add new categories to existing ones, avoiding duplicates
+                    for cat in normalized_categories:
+                        if cat not in ground_truth[file_name]:
+                            ground_truth[file_name].append(cat)
+                else:
+                    # First occurrence of this file
+                    ground_truth[file_name] = normalized_categories
+        
+        # Remove files with no categories
+        ground_truth = {k: v for k, v in ground_truth.items() if v}
+        
+        logger.info(f"📊 Loaded ground truth for {len(ground_truth)} files")
+        if logger.isEnabledFor(logging.DEBUG):
+            for file_name, categories in list(ground_truth.items())[:5]:  # Show first 5
+                logger.debug(f"📊 {file_name}: {categories}")
+        
+        return ground_truth
+        
+    except Exception as e:
+        logger.error(f"Failed to load ground truth from {ground_truth_file}: {e}")
+        return {}
 
 
 # Document Type Classification Endpoints
@@ -805,10 +993,11 @@ def process_pdf_folder():
     """Process a folder of PDF files with batch processing capabilities"""
     try:
         data = request.get_json()
-        if not data or 'pdf_folder' not in data:
-            return jsonify({"error": "pdf_folder path is required"}), 400
         
-        pdf_folder = data['pdf_folder']
+        # Support both parameter names for backwards compatibility
+        pdf_folder = data.get('pdf_folder') or data.get('folder_path')
+        if not pdf_folder:
+            return jsonify({"error": "pdf_folder or folder_path is required"}), 400
         
         # Validate folder exists
         if not Path(pdf_folder).exists():
@@ -825,6 +1014,28 @@ def process_pdf_folder():
         output_folder = data.get('output_folder', './results')
         enable_metrics = data.get('enable_metrics', True)
         include_patterns = data.get('include_patterns', [])
+        max_files = data.get('max_files', None)
+        
+        # Auto-detect ground truth Excel file using batch processor logic
+        if not ground_truth_file and enable_metrics:
+            ground_truth_file = _auto_detect_ground_truth(pdf_folder)
+            if ground_truth_file:
+                logger.info(f"📊 Auto-detected ground truth file: {Path(ground_truth_file).name}")
+            else:
+                logger.info("📊 No ground truth file auto-detected")
+        
+        # Load ground truth if available using batch processor logic
+        ground_truth_data = {}
+        if ground_truth_file and enable_metrics:
+            ground_truth_data = _load_ground_truth(ground_truth_file)
+            logger.info(f"📊 Loaded ground truth for {len(ground_truth_data)} files")
+        
+        # Enhanced logging options
+        debug_logging = data.get('debug_logging', False)
+        per_file_logging = data.get('per_file_logging', False)
+        log_text_extraction = data.get('log_text_extraction', False)
+        log_classification_details = data.get('log_classification_details', False)
+        create_per_file_logs = data.get('create_per_file_logs', False) or per_file_logging
         
         # Process each PDF using the already-initialized classification service
         import time
@@ -850,6 +1061,12 @@ def process_pdf_folder():
         else:
             pdf_files = all_pdf_files
         
+        # Apply max_files limit if specified
+        if max_files and max_files > 0 and len(pdf_files) > max_files:
+            original_count = len(pdf_files)
+            pdf_files = pdf_files[:max_files]
+            logger.info(f"Limited to {max_files} files (was {original_count} files)")
+        
         # Initialize results structure
         results = {
             'processing_stats': {
@@ -863,24 +1080,85 @@ def process_pdf_folder():
             'overall_metrics': {}
         }
         
+        # Set up enhanced logging if requested
+        if debug_logging:
+            logging.getLogger().setLevel(logging.DEBUG)
+            logging.getLogger('classifier').setLevel(logging.DEBUG)
+            
         # Process each PDF file
         for pdf_file in pdf_files:
+            file_logger = None
             try:
                 processing_start = time.time()
-                logger.info(f"Processing {pdf_file.name}...")
+                
+                # Setup per-file logger if requested
+                if create_per_file_logs:
+                    file_logger, log_path = setup_per_file_logger(pdf_file.name, output_folder)
+                    file_logger.info(f"📄 PROCESSING FILE: {pdf_file.name}")
+                    file_logger.info(f"📁 File Path: {pdf_file}")
+                    file_logger.info(f"📊 File Size: {pdf_file.stat().st_size:,} bytes")
+                    file_logger.info(f"{'='*80}")
+                    logger.info(f"📄 Processing {pdf_file.name} (log: {log_path})")
+                elif per_file_logging:
+                    logger.info(f"\n{'='*80}")
+                    logger.info(f"📄 PROCESSING FILE: {pdf_file.name}")
+                    logger.info(f"📁 File Path: {pdf_file}")
+                    logger.info(f"📊 File Size: {pdf_file.stat().st_size:,} bytes")
+                    logger.info(f"{'='*80}")
+                else:
+                    logger.info(f"Processing {pdf_file.name}...")
                 
                 # Extract text from PDF using same method as batch processor
+                if log_text_extraction:
+                    dual_log(logger, file_logger, 'info', f"🔍 Starting text extraction...")
+                    
                 from classifier.pdf_extractor import PDFExtractor
                 pdf_extractor = PDFExtractor(max_pages=2)  # Same as batch processor
+                
+                text_start = time.time()
                 extracted_text, extraction_method = pdf_extractor.extract_text(str(pdf_file))
+                text_time = time.time() - text_start
+                
+                if log_text_extraction:
+                    dual_log(logger, file_logger, 'info', f"✅ Text extraction completed:")
+                    dual_log(logger, file_logger, 'info', f"   📏 Characters extracted: {len(extracted_text):,}")
+                    dual_log(logger, file_logger, 'info', f"   ⚡ Extraction method: {extraction_method}")
+                    dual_log(logger, file_logger, 'info', f"   ⏱️  Extraction time: {text_time:.2f}s")
+                    if len(extracted_text) > 0:
+                        preview = extracted_text[:200].replace('\n', ' ')
+                        dual_log(logger, file_logger, 'info', f"   👀 Text preview: {preview}...")
+                    else:
+                        dual_log(logger, file_logger, 'warning', f"   ⚠️  No text extracted!")
+                elif per_file_logging:
+                    dual_log(logger, file_logger, 'info', f"📝 Text extracted: {len(extracted_text):,} chars via {extraction_method} ({text_time:.2f}s)")
                 
                 # Extract correspondence content (subject/body) - same as batch processor
+                if log_text_extraction:
+                    dual_log(logger, file_logger, 'info', f"📧 Starting correspondence extraction...")
+                    
                 from extract_correspondence_content import CorrespondenceExtractor
                 extractor = CorrespondenceExtractor()
+                
+                corr_start = time.time()
                 correspondence = extractor.extract_correspondence_content(extracted_text)
+                corr_time = time.time() - corr_start
                 
                 # Create focused content like batch processor
                 focused_content = f"Subject: {correspondence['subject']}\n\nContent: {correspondence['body']}"
+                
+                if log_text_extraction:
+                    dual_log(logger, file_logger, 'info', f"✅ Correspondence extraction completed:")
+                    dual_log(logger, file_logger, 'info', f"   📧 Subject length: {len(correspondence['subject'])} chars")
+                    dual_log(logger, file_logger, 'info', f"   📄 Body length: {len(correspondence['body'])} chars")
+                    dual_log(logger, file_logger, 'info', f"   📝 Focused content length: {len(focused_content)} chars")
+                    dual_log(logger, file_logger, 'info', f"   ⏱️  Correspondence time: {corr_time:.2f}s")
+                    if len(correspondence['subject']) > 0:
+                        subject_preview = correspondence['subject'][:100].replace('\n', ' ')
+                        dual_log(logger, file_logger, 'info', f"   📧 Subject preview: {subject_preview}...")
+                    else:
+                        dual_log(logger, file_logger, 'warning', f"   ⚠️  No subject extracted!")
+                elif per_file_logging:
+                    dual_log(logger, file_logger, 'info', f"📧 Correspondence: Subject({len(correspondence['subject'])}), Body({len(correspondence['body'])}) chars ({corr_time:.2f}s)")
                 
                 # Initialize result structure like batch processor
                 file_result = {
@@ -897,26 +1175,54 @@ def process_pdf_folder():
                         'extraction_method': extraction_method,
                         'correspondence_method': correspondence.get('extraction_method', 'pattern_matching')
                     },
-                    'ground_truth': [],  # Will be populated if ground truth is available
+                    'ground_truth': ground_truth_data.get(pdf_file.name, []),  # Use loaded ground truth data
                     'metrics': {}
                 }
                 
                 # Process with hybrid_rag approach using the actual classifier
                 approach_name = 'hybrid_rag'
                 if classification_service.hybrid_rag_classifier:
-                    logger.info(f"  🔍 Classifying with Hybrid RAG approach...")
+                    if log_classification_details:
+                        dual_log(logger, file_logger, 'info', f"🤖 Starting Hybrid RAG classification...")
+                        dual_log(logger, file_logger, 'info', f"   📝 Input content length: {len(focused_content)} chars")
+                        dual_log(logger, file_logger, 'info', f"   🔧 Classifier type: {type(classification_service.hybrid_rag_classifier).__name__}")
+                    elif per_file_logging:
+                        dual_log(logger, file_logger, 'info', f"🔍 Classifying with Hybrid RAG approach...")
+                    else:
+                        dual_log(logger, file_logger, 'info', f"  🔍 Classifying with Hybrid RAG approach...")
                     
                     approach_start = time.time()
                     approach_result = classification_service.hybrid_rag_classifier.classify(focused_content, is_file_path=False)
                     approach_time = time.time() - approach_start
                     
+                    if log_classification_details:
+                        logger.info(f"✅ Classification completed:")
+                        logger.info(f"   ⏱️  Classification time: {approach_time:.2f}s")
+                        logger.info(f"   📊 Result status: {approach_result.get('status', 'unknown')}")
+                        logger.info(f"   🔬 Result keys: {list(approach_result.keys())}")
+                        if 'categories' in approach_result:
+                            logger.info(f"   📋 Raw categories count: {len(approach_result.get('categories', []))}")
+                        if 'llm_provider_used' in approach_result:
+                            logger.info(f"   🤖 LLM provider: {approach_result.get('llm_provider_used')}")
+                        if 'method_used' in approach_result:
+                            logger.info(f"   ⚙️  Method used: {approach_result.get('method_used')}")
+                    
                     # Check if classification was skipped due to quality issues
                     if approach_result.get('status') == 'skipped':
-                        logger.warning(f"    ⚠️ Document skipped due to quality issues: {approach_result.get('message', 'Unknown reason')}")
+                        skip_message = approach_result.get('message', 'Unknown reason')
+                        if log_classification_details:
+                            logger.warning(f"⚠️  Document skipped due to quality issues:")
+                            logger.warning(f"   📝 Skip reason: {skip_message}")
+                            logger.warning(f"   🔍 Quality check: {approach_result.get('quality_check', 'failed')}")
+                            logger.warning(f"   ⏱️  Time spent: {approach_time:.2f}s")
+                        elif per_file_logging:
+                            logger.warning(f"⚠️  DOCUMENT SKIPPED: {skip_message} ({approach_time:.2f}s)")
+                        else:
+                            logger.warning(f"    ⚠️ Document skipped due to quality issues: {skip_message}")
                         
                         file_result['approaches'][approach_name] = {
                             'status': 'skipped',
-                            'skip_reason': approach_result.get('message', 'Document quality too low'),
+                            'skip_reason': skip_message,
                             'quality_check': approach_result.get('quality_check', 'failed'),
                             'processing_time': approach_time,
                             'categories': [],  # No categories due to quality issues
@@ -924,7 +1230,8 @@ def process_pdf_folder():
                             'full_result': approach_result
                         }
                         
-                        logger.info(f"    ⚠️ Hybrid RAG: {approach_time:.2f}s - DOCUMENT SKIPPED (Quality Issues)")
+                        if not log_classification_details and not per_file_logging:
+                            logger.info(f"    ⚠️ Hybrid RAG: {approach_time:.2f}s - DOCUMENT SKIPPED (Quality Issues)")
                     # Check if classification failed due to LLM error
                     elif approach_result.get('status') == 'error' and approach_result.get('error_type') == 'llm_validation_failed':
                         error_msg = f"❌ LLM Validation Failed ({approach_result.get('provider', 'Unknown')}): {approach_result.get('message', 'Unknown error')}"
@@ -949,7 +1256,18 @@ def process_pdf_folder():
                         category_details = []
                         confidence_threshold = 0.2  # Same as batch processor
                         
-                        for cat_info in approach_result.get('categories', []):
+                        raw_categories = approach_result.get('categories', [])
+                        if log_classification_details:
+                            logger.info(f"📋 Processing {len(raw_categories)} raw categories:")
+                            for i, cat_info in enumerate(raw_categories[:5]):  # Show first 5
+                                category = cat_info.get('category', '')
+                                confidence = cat_info.get('confidence', 0.0)
+                                logger.info(f"   {i+1}. {category} (confidence: {confidence:.3f})")
+                            if len(raw_categories) > 5:
+                                logger.info(f"   ... and {len(raw_categories) - 5} more")
+                            logger.info(f"🔍 Applying confidence threshold: {confidence_threshold}")
+                        
+                        for cat_info in raw_categories:
                             category = cat_info.get('category', '')
                             confidence = cat_info.get('confidence', 0.0)
                             
@@ -962,10 +1280,23 @@ def process_pdf_folder():
                                     'evidence': cat_info.get('evidence', ''),  # RAG lookup evidence/justification
                                     'issue_types': cat_info.get('issue_types', [])  # Issue types that led to this category
                                 })
+                                if log_classification_details:
+                                    logger.info(f"   ✅ Kept: {category} ({confidence:.3f})")
                             else:
-                                logger.debug(f"Filtered out low confidence category '{category}' ({confidence:.3f} < {confidence_threshold})")
+                                if log_classification_details:
+                                    logger.info(f"   ❌ Filtered: {category} ({confidence:.3f} < {confidence_threshold})")
+                                else:
+                                    logger.debug(f"Filtered out low confidence category '{category}' ({confidence:.3f} < {confidence_threshold})")
                         
-                        logger.info(f"    Kept {len(categories)} categories above {confidence_threshold} confidence threshold")
+                        if log_classification_details:
+                            logger.info(f"📊 Category filtering results:")
+                            logger.info(f"   📋 Raw categories: {len(raw_categories)}")
+                            logger.info(f"   ✅ Kept categories: {len(categories)}")
+                            logger.info(f"   📝 Final categories: {categories}")
+                        elif per_file_logging:
+                            logger.info(f"📊 Categories: {len(raw_categories)} → {len(categories)} (threshold: {confidence_threshold})")
+                        else:
+                            logger.info(f"    Kept {len(categories)} categories above {confidence_threshold} confidence threshold")
                         
                         file_result['approaches'][approach_name] = {
                             'status': 'success',
@@ -976,7 +1307,15 @@ def process_pdf_folder():
                             'full_result': approach_result
                         }
                         
-                        logger.info(f"    ✅ Hybrid RAG: {approach_time:.2f}s - Categories: {categories}")
+                        if log_classification_details:
+                            logger.info(f"✅ Hybrid RAG classification successful:")
+                            logger.info(f"   ⏱️  Total time: {approach_time:.2f}s")
+                            logger.info(f"   🤖 Provider: {approach_result.get('llm_provider_used', 'unknown')}")
+                            logger.info(f"   📋 Final categories: {categories}")
+                        elif per_file_logging:
+                            logger.info(f"✅ Classification complete: {categories} ({approach_time:.2f}s)")
+                        else:
+                            logger.info(f"    ✅ Hybrid RAG: {approach_time:.2f}s - Categories: {categories}")
                 else:
                     logger.warning("Hybrid RAG classifier not available")
                     file_result['approaches'][approach_name] = {
@@ -986,85 +1325,62 @@ def process_pdf_folder():
                         'category_details': []
                     }
                 
-                # Load ground truth and calculate metrics if available
-                if ground_truth_file and enable_metrics:
-                    try:
-                        import pandas as pd
-                        gt_df = pd.read_excel(ground_truth_file)
-                        
-                        # Find ground truth for this file (search in column 2, index 2)
-                        file_base_name = pdf_file.stem  # Remove .pdf extension
-                        gt_row = None
-                        for _, row in gt_df.iterrows():
-                            if pd.notna(row.iloc[2]) and str(row.iloc[2]).strip().replace('.pdf', '') == file_base_name:
-                                gt_row = row
-                                break
-                        
-                        if gt_row is not None:
-                            # Extract ground truth categories (column 5, index 5)
-                            gt_categories_raw = str(gt_row.iloc[5]) if pd.notna(gt_row.iloc[5]) else ""
-                            gt_categories = []
+                # Calculate metrics if ground truth is available
+                if file_result['ground_truth'] and enable_metrics:
+                    gt_categories = file_result['ground_truth']
+                    dual_log(logger, file_logger, 'info', f"📊 Ground truth loaded: {gt_categories}")
+                    
+                    # Calculate metrics for each approach using batch processor logic
+                    for approach_name in file_result.get('approaches', {}):
+                        if approach_name in file_result['approaches']:
+                            predicted_categories = file_result['approaches'][approach_name].get('categories', [])
                             
-                            if gt_categories_raw and gt_categories_raw.strip() not in ["", "nan"]:
-                                # Split by common delimiters
-                                for delimiter in [',', ';', '|', '&']:
-                                    if delimiter in gt_categories_raw:
-                                        gt_categories = [cat.strip() for cat in gt_categories_raw.split(delimiter) if cat.strip()]
-                                        break
-                                else:
-                                    gt_categories = [gt_categories_raw.strip()]
+                            # Filter out "Others" category for metrics calculation
+                            gt_categories_filtered = [cat for cat in gt_categories if cat.lower() != 'others']
+                            predicted_categories_filtered = [cat for cat in predicted_categories if cat.lower() != 'others']
                             
-                            file_result['ground_truth'] = gt_categories
+                            # Calculate metrics using MetricsCalculator
+                            metrics = metrics_calculator.calculate_metrics(gt_categories_filtered, predicted_categories_filtered)
+                            file_result['approaches'][approach_name]['metrics'] = metrics
                             
-                            # Calculate metrics for each approach
-                            for approach_name, approach_data in file_result.get('approaches', {}).items():
-                                if approach_data.get('status') == 'success':
-                                    predicted_categories = approach_data.get('categories', [])
-                                    
-                                    # Calculate metrics
-                                    gt_set = set(gt_categories)
-                                    pred_set = set(predicted_categories)
-                                    
-                                    tp = len(gt_set.intersection(pred_set))
-                                    fp = len(pred_set - gt_set)
-                                    fn = len(gt_set - pred_set)
-                                    
-                                    precision = tp / len(pred_set) if pred_set else 0.0
-                                    recall = tp / len(gt_set) if gt_set else 0.0
-                                    f1_score = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
-                                    exact_match = 1.0 if gt_set == pred_set else 0.0
-                                    jaccard = tp / (tp + fp + fn) if (tp + fp + fn) > 0 else 0.0
-                                    
-                                    approach_data['metrics'] = {
-                                        'tp': tp,
-                                        'fp': fp, 
-                                        'fn': fn,
-                                        'precision': precision,
-                                        'recall': recall,
-                                        'f1_score': f1_score,
-                                        'exact_match': exact_match,
-                                        'jaccard_similarity': jaccard,
-                                        'ground_truth_count': len(gt_categories),
-                                        'predicted_count': len(predicted_categories),
-                                        'correct_predictions': tp,
-                                        'missed_categories': list(gt_set - pred_set),
-                                        'extra_categories': list(pred_set - gt_set),
-                                        'correct_categories': list(gt_set.intersection(pred_set))
-                                    }
-                                    
-                            logger.info(f"    📊 Ground truth loaded: {gt_categories}")
-                        else:
-                            logger.warning(f"    ⚠️ No ground truth found for {pdf_file.name}")
-                    except Exception as gt_error:
-                        logger.error(f"    ❌ Ground truth loading failed: {gt_error}")
+                            dual_log(logger, file_logger, 'info', f"📊 {approach_name} metrics calculated: precision={metrics.get('precision', 0):.3f}, recall={metrics.get('recall', 0):.3f}, f1={metrics.get('f1_score', 0):.3f}")
+                    
+                    dual_log(logger, file_logger, 'info', "📊 Metrics calculation completed")
                 
                 file_result['processing_time'] = time.time() - processing_start
                 results['results'].append(file_result)
                 results['processing_stats']['processed_files'] += 1
-                logger.info(f"✅ {pdf_file.name} processed successfully")
+                
+                # Final per-file summary
+                if per_file_logging:
+                    dual_log(logger, file_logger, 'info', f"\n📊 FILE SUMMARY: {pdf_file.name}")
+                    dual_log(logger, file_logger, 'info', f"   ⏱️  Total processing time: {file_result['processing_time']:.2f}s")
+                    dual_log(logger, file_logger, 'info', f"   📄 Status: {file_result['status']}")
+                    if file_result.get('approaches'):
+                        for approach_name, approach_data in file_result['approaches'].items():
+                            status = approach_data.get('status', 'unknown')
+                            categories = approach_data.get('categories', [])
+                            proc_time = approach_data.get('processing_time', 0)
+                            dual_log(logger, file_logger, 'info', f"   🔍 {approach_name}: {status} - {len(categories)} categories ({proc_time:.2f}s)")
+                            if categories and log_classification_details:
+                                dual_log(logger, file_logger, 'info', f"      📋 Categories: {categories}")
+                    if file_result.get('ground_truth'):
+                        dual_log(logger, file_logger, 'info', f"   📊 Ground truth: {file_result['ground_truth']}")
+                    dual_log(logger, file_logger, 'info', f"{'='*80}\n")
+                else:
+                    dual_log(logger, file_logger, 'info', f"✅ {pdf_file.name} processed successfully")
+                
+                # Final log message for individual file log
+                if file_logger:
+                    file_logger.info(f"🎯 PROCESSING COMPLETED: {pdf_file.name}")
+                    file_logger.info(f"📊 Final Status: {file_result.get('status', 'unknown')}")
+                    file_logger.info(f"⏱️  Total Time: {file_result.get('processing_time', 0):.2f}s")
                     
             except Exception as e:
-                logger.error(f"❌ Failed to process {pdf_file.name}: {e}")
+                dual_log(logger, file_logger, 'error', f"❌ Failed to process {pdf_file.name}: {e}")
+                if file_logger:
+                    file_logger.error(f"🎯 PROCESSING FAILED: {pdf_file.name}")
+                    file_logger.error(f"❌ Error: {str(e)}")
                 file_result = {
                     'file_name': pdf_file.name,
                     'file_path': str(pdf_file),
@@ -1073,6 +1389,11 @@ def process_pdf_folder():
                 }
                 results['results'].append(file_result)
                 results['processing_stats']['failed_files'] += 1
+                
+            finally:
+                # Clean up per-file logger
+                if file_logger:
+                    cleanup_per_file_logger(file_logger)
         
         results['processing_stats']['end_time'] = datetime.now()
         
@@ -1106,7 +1427,7 @@ def process_pdf_folder():
                         'save_format': 'xlsx'
                     },
                     'processing': {
-                        'max_files': None,
+                        'max_files': max_files,
                         'max_pages_per_pdf': 2,
                         'rate_limit_delay': 1,
                         'skip_on_error': True
