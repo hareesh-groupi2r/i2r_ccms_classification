@@ -29,6 +29,7 @@ sys.path.insert(0, str(project_root))
 
 # Import batch processor components for ground truth handling
 from classifier.category_normalizer import CategoryNormalizer
+from classifier.unified_issue_mapper import UnifiedIssueCategoryMapper
 from metrics_calculator import MetricsCalculator
 
 
@@ -47,6 +48,13 @@ orchestrator = DocumentProcessingOrchestrator(config_service)
 # Initialize batch processor components for ground truth handling
 category_normalizer = CategoryNormalizer(strict_mode=False)
 metrics_calculator = MetricsCalculator()
+
+# Initialize unified issue mapper for proper issue→category mapping
+project_root = Path(__file__).parent.parent.parent
+unified_issue_mapper = UnifiedIssueCategoryMapper(
+    training_data_path=str(project_root / "data/raw/Consolidated_labeled_data.xlsx"),
+    mapping_file_path=str(project_root / "unified_issue_category_mapping.xlsx")
+)
 
 # Helper functions
 def allowed_file(filename: str) -> bool:
