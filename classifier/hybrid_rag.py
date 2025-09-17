@@ -641,19 +641,34 @@ Mapped categories:
 
 {constraints}
 
-CRITICAL EVIDENCE REQUIREMENTS:
-1. Extract evidence ONLY from the provided document excerpt above
-2. Use direct quotes from the current document being analyzed
-3. Do NOT use external knowledge, training data, or reference documents
-4. If no evidence exists in current document, mark confidence as 0
-5. Provide exact text snippets that support each classification
+EVIDENCE REQUIREMENTS:
+1. Use both direct quotes AND reasonable inference from document context
+2. Consider document context and industry patterns for contract correspondence
+3. Authority Engineer correspondence indicates Authority obligations
+4. Contract language indicates specific party obligations
+5. Provide supporting text evidence for each classification
 
-STRICT VALIDATION RULES:
-6. Issue must be EXPLICITLY mentioned or clearly implied in the document excerpt
-7. Do NOT infer issues from general document type patterns  
-8. Authority Engineer involvement alone is NOT an issue type
-9. Reject issues if confidence < {self.min_llm_confidence} for this specific document
-10. Maximum 5 validated issues per document
+POSITIVE ISSUE DETECTION GUIDANCE:
+
+Authority's Obligations - Look for:
+✅ "Authority Engineer issued instructions/letters"
+✅ "Authority shall provide/arrange/ensure"  
+✅ "Authority Engineer approval/clearance required"
+✅ "Authority's responsibility to deliver"
+✅ Authority delays or failures to provide
+
+Contractor's Obligations - Look for:
+✅ "Contractor shall submit/deliver/ensure"
+✅ "As per contract, contractor must"
+✅ Contractor reporting requirements
+✅ Contractor performance obligations
+✅ Contractor delays or compliance issues
+
+VALIDATION RULES:
+6. Issue must be mentioned OR reasonably inferred from document context
+7. Authority Engineer involvement IS a valid Authority obligation issue
+8. Accept issues with confidence >= {self.min_llm_confidence}
+9. Maximum 12 validated issues per document (increased for comprehensive detection)
 
 ISSUE TYPE DISAMBIGUATION (KEY DISTINCTIONS):
 
@@ -898,9 +913,10 @@ CRITICAL RESPONSE FORMAT:
                     {"role": "system", "content": "You are a contract classification expert."},
                     {"role": "user", "content": prompt}
                 ],
-                temperature=0.1,
+                temperature=0.0,
                 max_tokens=1000,
-                response_format={"type": "json_object"}
+                response_format={"type": "json_object"},
+                seed=42
             )
             response_content = response.choices[0].message.content
             
@@ -911,8 +927,9 @@ CRITICAL RESPONSE FORMAT:
                     {"role": "system", "content": "You are a contract classification expert."},
                     {"role": "user", "content": prompt}
                 ],
-                temperature=0.1,
-                max_tokens=1000
+                temperature=0.0,
+                max_tokens=1000,
+                seed=42
             )
             response_content = response.choices[0].message.content
             
@@ -923,7 +940,7 @@ CRITICAL RESPONSE FORMAT:
                     {"role": "user", "content": prompt}
                 ],
                 max_tokens=1000,
-                temperature=0.1
+                temperature=0.0
             )
             response_content = response.content[0].text
             

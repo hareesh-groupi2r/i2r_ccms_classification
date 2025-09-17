@@ -75,6 +75,29 @@ def display_classification_results(result: Dict, show_details: bool = True):
     print(f"   Focused Content Length: {extraction.get('focused_length', 0)} chars")
     print()
     
+    # Display ground truth comparison if available
+    if 'ground_truth_comparison' in result:
+        gt_comparison = result['ground_truth_comparison']
+        print(f"📊 GROUND TRUTH COMPARISON:")
+        
+        if gt_comparison['status'] == 'compared':
+            print(f"   Ground Truth: {', '.join(gt_comparison['ground_truth_categories'])}")
+            print(f"   Predicted: {', '.join(gt_comparison['predicted_categories'])}")
+            print(f"   Precision: {gt_comparison['precision']:.3f}")
+            print(f"   Recall: {gt_comparison['recall']:.3f}")
+            print(f"   F1-Score: {gt_comparison['f1_score']:.3f}")
+            
+            if gt_comparison['missing_categories']:
+                print(f"   Missing: {', '.join(gt_comparison['missing_categories'])}")
+            if gt_comparison['extra_categories']:
+                print(f"   Extra: {', '.join(gt_comparison['extra_categories'])}")
+        else:
+            print(f"   Status: {gt_comparison['status']}")
+            if 'message' in gt_comparison:
+                print(f"   Message: {gt_comparison['message']}")
+        
+        print()
+    
     if show_details:
         # Display approach-specific results
         print(f"🔧 APPROACH-SPECIFIC RESULTS:")
@@ -210,7 +233,8 @@ def process_single_pdf(pdf_path: str,
                       max_pages: int = None,
                       show_details: bool = True,
                       save_json: bool = True,
-                      save_excel: bool = True) -> bool:
+                      save_excel: bool = True,
+                      ground_truth_file: str = None) -> bool:
     """Process a single PDF using unified processor."""
     
     print(f"🧪 UNIFIED PDF PROCESSING")
@@ -250,7 +274,8 @@ def process_single_pdf(pdf_path: str,
             pdf_path=pdf_path,
             approaches=approaches,
             confidence_threshold=confidence_threshold,
-            max_pages=max_pages
+            max_pages=max_pages,
+            ground_truth_file=ground_truth_file
         )
         
         # Display results
@@ -329,6 +354,8 @@ Examples:
                        help='Skip JSON output')
     parser.add_argument('--no-excel', action='store_true',
                        help='Skip Excel output')
+    parser.add_argument('--ground-truth', type=str,
+                       help='Path to ground truth Excel file for comparison')
     
     args = parser.parse_args()
     
@@ -363,7 +390,8 @@ Examples:
         max_pages=args.max_pages,
         show_details=not args.no_details,
         save_json=not args.no_json,
-        save_excel=not args.no_excel
+        save_excel=not args.no_excel,
+        ground_truth_file=args.ground_truth
     )
     
     if success:

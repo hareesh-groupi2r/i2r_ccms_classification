@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 import pandas as pd
 import json
+import yaml
 from datetime import datetime
 
 from classifier.config_manager import ConfigManager
@@ -50,14 +51,52 @@ class UnifiedPDFProcessor:
         self.config_manager = ConfigManager(config_path or "config.yaml")
         self.config = self.config_manager.get_all_config()
         
+        # Load batch-specific configuration
+        self.batch_config = self._load_batch_config(batch_config_path or "batch_config.yaml")
+        
+        # Get processing settings from batch config
+        processing_config = self.batch_config.get('batch_processing', {}).get('processing', {})
+        self.max_pages_per_pdf = processing_config.get('max_pages_per_pdf', 2)
+        self.extract_correspondence = processing_config.get('extract_correspondence', True)
+        
         # Initialize components
         self._init_components()
         
-        # Initialize classifiers based on configuration
+        # Initialize classifiers based on batch configuration
         self.classifiers = {}
         self._init_classifiers()
         
         logger.info("UnifiedPDFProcessor initialized")
+    
+    def _load_batch_config(self, config_path: str) -> Dict:
+        """Load batch configuration from YAML file."""
+        try:
+            config_path = Path(config_path)
+            if config_path.exists():
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    return yaml.safe_load(f)
+            else:
+                logger.warning(f"Batch config file not found: {config_path}, using defaults")
+                return self._get_default_batch_config()
+        except Exception as e:
+            logger.error(f"Error loading batch config: {e}")
+            return self._get_default_batch_config()
+    
+    def _get_default_batch_config(self) -> Dict:
+        """Get default batch configuration."""
+        return {
+            'batch_processing': {
+                'enabled': True,
+                'approaches': {
+                    'hybrid_rag': {'enabled': True, 'priority': 1},
+                    'pure_llm': {'enabled': False, 'priority': 2}
+                },
+                'processing': {
+                    'max_pages_per_pdf': 2,
+                    'extract_correspondence': True
+                }
+            }
+        }
     
     def _init_components(self):
         """Initialize shared components."""
@@ -73,11 +112,11 @@ class UnifiedPDFProcessor:
         logger.info("Unified processor components initialized")
     
     def _init_classifiers(self):
-        """Initialize classifiers based on configuration."""
-        enabled_approaches = self.config_manager.get_enabled_approaches()
+        """Initialize classifiers based on batch configuration."""
+        batch_approaches = self.batch_config.get('batch_processing', {}).get('approaches', {})
         
-        # Initialize Hybrid RAG if enabled
-        if 'hybrid_rag' in enabled_approaches:
+        # Initialize Hybrid RAG if enabled in batch config
+        if batch_approaches.get('hybrid_rag', {}).get('enabled', True):
             config = self.config_manager.get_approach_config('hybrid_rag')
             classifier = HybridRAGClassifier(
                 config=config,
@@ -97,8 +136,8 @@ class UnifiedPDFProcessor:
             self.classifiers['hybrid_rag'] = classifier
             logger.info("✅ Hybrid RAG classifier initialized")
         
-        # Initialize Pure LLM if enabled
-        if 'pure_llm' in enabled_approaches:
+        # Initialize Pure LLM if enabled in batch config
+        if batch_approaches.get('pure_llm', {}).get('enabled', False):
             config = self.config_manager.get_approach_config('pure_llm')
             if config.get('api_key'):
                 self.classifiers['pure_llm'] = PureLLMClassifier(
@@ -120,7 +159,8 @@ class UnifiedPDFProcessor:
                           pdf_path: str, 
                           approaches: List[str] = None,
                           confidence_threshold: float = 0.3,
-                          max_pages: int = None) -> Dict:
+                          max_pages: int = None,
+                          ground_truth_file: str = None) -> Dict:
         """
         Process a single PDF file with unified pipeline.
         
@@ -171,9 +211,10 @@ class UnifiedPDFProcessor:
         
         try:
             # Step 1: Extract PDF content
-            if max_pages:
-                self.pdf_extractor = PDFExtractor(max_pages=max_pages)
+            # Use max_pages from parameter or batch config default
+            effective_max_pages = max_pages or self.max_pages_per_pdf
             
+            self.pdf_extractor = PDFExtractor(max_pages=effective_max_pages)
             raw_text, extraction_method = self.pdf_extractor.extract_text(pdf_path)
             
             # Step 2: Extract correspondence content (standardized preprocessing)
@@ -280,6 +321,12 @@ class UnifiedPDFProcessor:
             logger.info(f"📊 Processing completed: {len(result['unified_results']['categories'])} categories, "
                       f"{len(result['unified_results']['issues'])} issues "
                       f"(confidence: {result['unified_results']['confidence_score']:.3f})")
+            
+            # Step 5: Add ground truth comparison if available
+            if ground_truth_file:
+                result['ground_truth_comparison'] = self._compare_with_ground_truth(
+                    result, pdf_path.name, ground_truth_file
+                )
             
         except Exception as e:
             result['status'] = 'failed'
@@ -448,3 +495,71 @@ class UnifiedPDFProcessor:
             'total_categories': len(self.issue_mapper.get_all_categories()),
             'training_samples': len(self.data_analyzer.df) if hasattr(self.data_analyzer, 'df') else 0
         }
+    
+    def _compare_with_ground_truth(self, result: Dict, file_name: str, ground_truth_file: str) -> Dict:
+        """
+        Compare classification results with ground truth.
+        
+        Args:
+            result: Classification result
+            file_name: Name of the processed file
+            ground_truth_file: Path to ground truth Excel file
+            
+        Returns:
+            Ground truth comparison results
+        """
+        try:
+            # Load ground truth
+            gt_df = pd.read_excel(ground_truth_file)
+            
+            # Find ground truth for this file
+            gt_row = None
+            for _, row in gt_df.iterrows():
+                if row.iloc[2] and str(row.iloc[2]).strip().lower() == file_name.lower():
+                    gt_row = row
+                    break
+            
+            if gt_row is None:
+                return {
+                    'status': 'no_ground_truth',
+                    'message': f'No ground truth found for {file_name}'
+                }
+            
+            # Extract ground truth categories (column 5, comma-separated)
+            gt_categories_raw = str(gt_row.iloc[5]) if pd.notna(gt_row.iloc[5]) else ""
+            gt_categories = []
+            
+            if gt_categories_raw and gt_categories_raw.strip() not in ["", "nan"]:
+                # Normalize ground truth categories
+                gt_categories = self.category_normalizer.parse_and_normalize_categories(gt_categories_raw)
+            
+            # Get predicted categories
+            pred_categories = [cat['category'] for cat in result['unified_results']['categories']]
+            
+            # Calculate metrics
+            gt_set = set(gt_categories)
+            pred_set = set(pred_categories)
+            
+            correct = len(gt_set.intersection(pred_set))
+            precision = correct / len(pred_set) if pred_set else 0.0
+            recall = correct / len(gt_set) if gt_set else 0.0
+            f1_score = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+            
+            return {
+                'status': 'compared',
+                'ground_truth_categories': gt_categories,
+                'predicted_categories': pred_categories,
+                'correct_predictions': correct,
+                'precision': precision,
+                'recall': recall,
+                'f1_score': f1_score,
+                'missing_categories': list(gt_set - pred_set),
+                'extra_categories': list(pred_set - gt_set)
+            }
+            
+        except Exception as e:
+            logger.error(f"Ground truth comparison failed: {e}")
+            return {
+                'status': 'error',
+                'message': f'Ground truth comparison failed: {e}'
+            }

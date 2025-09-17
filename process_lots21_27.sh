@@ -9,10 +9,9 @@ set -euo pipefail
 
 # Configuration
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VENV_DIR="$SCRIPT_DIR/venv"
 LOTS_BASE_DIR="$SCRIPT_DIR/data/Lots21-27"
 RESULTS_BASE_DIR="$SCRIPT_DIR/results"
-PYTHON_SCRIPT="process_batch_lots.py"
+INTEGRATED_BACKEND_URL="http://localhost:5001"
 
 # Colors for output
 RED='\033[0;31m'
@@ -35,12 +34,6 @@ info() { log "INFO: $1" "$BLUE"; }
 check_prerequisites() {
     info "Checking prerequisites..."
     
-    # Check virtual environment
-    if [[ ! -d "$VENV_DIR" ]]; then
-        error "Virtual environment not found at $VENV_DIR"
-        exit 1
-    fi
-    
     # Check if lots directory exists
     if [[ ! -d "$LOTS_BASE_DIR" ]]; then
         error "Lots directory not found at $LOTS_BASE_DIR"
@@ -50,93 +43,74 @@ check_prerequisites() {
     # Create results directory
     mkdir -p "$RESULTS_BASE_DIR"
     
-    # Check Python script
-    if [[ ! -f "$SCRIPT_DIR/$PYTHON_SCRIPT" ]]; then
-        info "Creating Python batch processing script..."
-        create_python_script
+    # Check if integrated backend is running
+    if ! curl -s "$INTEGRATED_BACKEND_URL/api/services/health" > /dev/null 2>&1; then
+        error "Integrated backend not running at $INTEGRATED_BACKEND_URL"
+        error "Please start the integrated backend server first:"
+        error "  cd integrated_backend && python api/app.py"
+        exit 1
+    else
+        info "✅ Integrated backend is running"
     fi
     
     success "Prerequisites checked"
 }
 
-# Create Python script for batch processing
-create_python_script() {
-    cat > "$SCRIPT_DIR/$PYTHON_SCRIPT" << 'PYTHON_EOF'
-#!/usr/bin/env python3
-"""
-Batch processing script for individual lots
-"""
-
-import sys
-import os
-from pathlib import Path
-import argparse
-import logging
-
-# Add project root to path
-sys.path.insert(0, str(Path(__file__).parent))
-
-from batch_processor import process_lot_pdfs
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
-
-def main():
-    parser = argparse.ArgumentParser(description='Process a lot of PDFs for classification')
-    parser.add_argument('--pdf-folder', required=True, help='Path to folder containing PDF files')
-    parser.add_argument('--ground-truth', help='Path to ground truth Excel file (optional)')
-    parser.add_argument('--output-folder', required=True, help='Output folder for results')
-    parser.add_argument('--lot-name', required=True, help='Name of the lot for logging')
-    parser.add_argument('--enable-llm', action='store_true', help='Enable Pure LLM approach')
-    parser.add_argument('--disable-metrics', action='store_true', help='Disable metrics calculation')
+# API call to integrated backend
+call_integrated_backend() {
+    local pdf_folder="$1"
+    local ground_truth_file="$2" 
+    local output_folder="$3"
+    local enable_metrics="$4"
     
-    args = parser.parse_args()
+    # Build JSON payload
+    local payload
+    payload=$(cat << EOF
+{
+    "pdf_folder": "$pdf_folder",
+    "output_folder": "$output_folder",
+    "options": {
+        "approaches": ["hybrid_rag"],
+        "confidence_threshold": 0.3,
+        "max_pages": 2
+    },
+    "enable_metrics": $enable_metrics
+EOF
+    )
     
-    logger.info(f"🚀 Starting batch processing for {args.lot_name}")
-    logger.info(f"📁 PDF Folder: {args.pdf_folder}")
-    logger.info(f"📊 Ground Truth: {args.ground_truth or 'Auto-detect'}")
-    logger.info(f"📁 Output Folder: {args.output_folder}")
-    logger.info(f"🤖 LLM Approach: {'Enabled' if args.enable_llm else 'Disabled'}")
-    logger.info(f"📈 Metrics: {'Disabled' if args.disable_metrics else 'Enabled'}")
+    # Add ground truth if provided
+    if [[ -n "$ground_truth_file" && -f "$ground_truth_file" ]]; then
+        payload=$(echo "$payload" | sed 's/$/,/' | sed '$s/,$//')
+        payload="$payload,\n    \"ground_truth_file\": \"$ground_truth_file\"\n}"
+    else
+        payload="$payload}"
+    fi
     
-    try:
-        # Process the lot
-        results = process_lot_pdfs(
-            pdf_folder=args.pdf_folder,
-            ground_truth_file=args.ground_truth,
-            enable_llm=args.enable_llm,
-            enable_metrics=not args.disable_metrics,
-            output_folder=args.output_folder
-        )
-        
-        # Log results summary
-        stats = results.get('processing_stats', {})
-        logger.info(f"✅ {args.lot_name} processing completed:")
-        logger.info(f"   📄 Total files: {stats.get('total_files', 0)}")
-        logger.info(f"   ✅ Processed: {stats.get('processed_files', 0)}")
-        logger.info(f"   ❌ Failed: {stats.get('failed_files', 0)}")
-        
-        if 'overall_metrics' in results:
-            logger.info(f"   📊 Metrics available in results")
-        
-        return 0
-        
-    except Exception as e:
-        logger.error(f"❌ Error processing {args.lot_name}: {e}")
-        import traceback
-        traceback.print_exc()
+    info "Calling integrated backend API..."
+    info "Payload: $(echo -e "$payload" | jq -c '.' 2>/dev/null || echo -e "$payload")"
+    
+    # Make API call
+    local response
+    response=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "$(echo -e "$payload")" \
+        "$INTEGRATED_BACKEND_URL/api/services/hybrid-rag-classification/process-folder")
+    
+    local curl_exit_code=$?
+    
+    if [[ $curl_exit_code -ne 0 ]]; then
+        error "API call failed with curl exit code: $curl_exit_code"
         return 1
-
-if __name__ == "__main__":
-    sys.exit(main())
-PYTHON_EOF
-
-    chmod +x "$SCRIPT_DIR/$PYTHON_SCRIPT"
-    success "Created Python batch processing script"
+    fi
+    
+    # Check if response indicates success
+    if echo "$response" | jq -e '.processing_stats' > /dev/null 2>&1; then
+        info "✅ API call successful"
+        return 0
+    else
+        error "API call failed. Response: $response"
+        return 1
+    fi
 }
 
 # Process individual lot
@@ -145,7 +119,7 @@ process_lot() {
     local pdf_folder="$2"
     local ground_truth_file="$3"
     local output_folder="$4"
-    local enable_llm="${5:-false}"
+    local enable_llm="${5:-false}" # Currently unused since integrated backend uses hybrid_rag only
     
     info "Processing $lot_name..."
     
@@ -168,42 +142,24 @@ process_lot() {
     # Create output directory
     mkdir -p "$output_folder"
     
-    # Activate virtual environment and run processing
-    (
-        source "$VENV_DIR/bin/activate"
-        export PYTHONPATH="$SCRIPT_DIR:$PYTHONPATH"
-        
-        # Build command
-        local cmd="python $PYTHON_SCRIPT --pdf-folder \"$pdf_folder\" --output-folder \"$output_folder\" --lot-name \"$lot_name\""
-        
-        # Add ground truth if available
-        if [[ -n "$ground_truth_file" && -f "$ground_truth_file" ]]; then
-            cmd="$cmd --ground-truth \"$ground_truth_file\""
-            info "$lot_name: Using ground truth file: $ground_truth_file"
-        else
-            info "$lot_name: No ground truth file, will auto-detect or skip metrics"
-        fi
-        
-        # Add LLM option
-        if [[ "$enable_llm" == "true" ]]; then
-            cmd="$cmd --enable-llm"
-            info "$lot_name: Pure LLM approach enabled"
-        else
-            info "$lot_name: Using Hybrid RAG approach only"
-        fi
-        
-        # Execute processing
-        eval "$cmd"
-        local exit_code=$?
-        
-        if [[ $exit_code -eq 0 ]]; then
-            success "$lot_name: Processing completed successfully"
-        else
-            error "$lot_name: Processing failed with exit code $exit_code"
-        fi
-        
-        return $exit_code
-    )
+    # Prepare parameters
+    local enable_metrics="true"
+    if [[ -n "$ground_truth_file" && -f "$ground_truth_file" ]]; then
+        info "$lot_name: Using ground truth file: $ground_truth_file"
+    else
+        info "$lot_name: No ground truth file, metrics will be limited"
+    fi
+    
+    info "$lot_name: Using Hybrid RAG approach via integrated backend"
+    
+    # Call integrated backend API
+    if call_integrated_backend "$pdf_folder" "$ground_truth_file" "$output_folder" "$enable_metrics"; then
+        success "$lot_name: Processing completed successfully"
+        return 0
+    else
+        error "$lot_name: Processing failed"
+        return 1
+    fi
 }
 
 # Main processing function

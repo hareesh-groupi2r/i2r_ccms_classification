@@ -101,7 +101,7 @@ class PureLLMClassifier:
         
         # 3. Anthropic client (third priority)
         try:
-            anthropic_api_key = os.getenv('ANTHROPIC_API_KEY')
+            anthropic_api_key = os.getenv('CLAUDE_API_KEY')
             if anthropic_api_key:
                 clients['anthropic'] = anthropic.Anthropic(api_key=anthropic_api_key)
                 logger.info("✅ Anthropic client initialized")
@@ -470,7 +470,7 @@ IMPORTANT: Only use issue types from the provided list. Be thorough and identify
             Validated categories with adjusted confidence
         """
         # Create summary of current classification
-        category_list = [c['category'] for c in categories[:5]]  # Top 5 categories
+        category_list = [c['category'] for c in categories[:7]]  # Top 7 categories
         
         prompt = f"""
 Review this classification for accuracy.

@@ -18,7 +18,7 @@ def test_anthropic_direct():
     print("=" * 50)
     
     # Initialize Anthropic client
-    client = anthropic.Anthropic(api_key=os.getenv('ANTHROPIC_API_KEY'))
+    client = anthropic.Anthropic(api_key=os.getenv('CLAUDE_API_KEY'))
     
     # Simple test content about change of scope
     test_content = """Subject: Change of Scope Proposal for toll plaza construction at Chennasamudram Village

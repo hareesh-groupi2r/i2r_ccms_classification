@@ -66,7 +66,7 @@ def test_hierarchical_system():
                 "text": doc["text"],
                 "approach": approach,
                 "confidence_threshold": 0.3,
-                "max_results": 5
+                "max_results": 7
             }
             
             try:

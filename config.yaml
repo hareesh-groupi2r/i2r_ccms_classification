@@ -14,19 +14,28 @@ approaches:
     embedding_model: "all-mpnet-base-v2"
     llm_model: "claude-sonnet-4-20250514"  # Use Anthropic (will test error handling)
     vector_db: "faiss"  # Options: faiss, pinecone, qdrant
-    top_k: 12             # Increase for better recall coverage
-    window_size: 3        # Increase back for better context matching
-    overlap: 1            # Restore overlap for better issue detection
-    similarity_threshold: 0.20  # Very low threshold for maximum recall
-    max_issues: 10        # Increase significantly to capture more valid issues
+    top_k: 20             # More candidates for diverse issue discovery  
+    window_size: 3        # Keep for good context matching
+    overlap: 1            # Keep for good issue detection
+    similarity_threshold: 0.15  # Lower threshold for broader matching
+    max_issues: 15        # Allow more issues to be considered
     document_context_chars: 2500  # More context for LLM
-    confidence_decay: 0.03 # Further reduce ranking penalty
-    min_llm_confidence: 0.1  # Very low LLM threshold to capture File 19 issues
+    confidence_decay: 0.03 # Keep same
+    min_llm_confidence: 0.01  # Extremely low threshold to capture all valid issues
     
-    # Confidence-based filtering for high precision
-    enable_confidence_filtering: true
-    confidence_divergence_threshold: 0.15  # Minimum gap between TP and FP confidence
-    top_percentage_filter: 0.20  # Only keep top 20% when divergence detected
+    # Less aggressive filtering for broader issue discovery
+    enable_confidence_filtering: false  # Disable to avoid missing valid issues
+    confidence_divergence_threshold: 0.10  # Less restrictive filtering
+    top_percentage_filter: 0.40  # Keep more candidates (40% instead of 20%)
+    
+    # Document quality settings (IMMEDIATE FIXES)
+    quality_settings:
+      min_text_length: 50          # Minimum characters for meaningful document
+      min_meaningful_words: 8      # Minimum meaningful words (non-filler)
+      min_unique_words: 5          # Minimum unique words for diversity
+      max_repetition_ratio: 0.7    # Maximum ratio of most common word
+      enable_ocr_detection: true   # Detect and reject OCR artifacts
+      enable_quality_filtering: true  # Enable the quality filtering system
     
   legalbert:
     enabled: false  # Enable after model training
@@ -116,7 +125,7 @@ api:
 # Monitoring and logging
 monitoring:
   track_metrics: true
-  log_level: "INFO"
+  log_level: "DEBUG"
   save_results: true
   results_path: "./reports/results"
   enable_telemetry: false

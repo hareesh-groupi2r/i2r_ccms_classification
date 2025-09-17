@@ -9,10 +9,10 @@ set -euo pipefail
 
 # Configuration
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VENV_DIR="$SCRIPT_DIR/venv"
 LOTS_BASE_DIR="$SCRIPT_DIR/data/Lots21-27"
 RESULTS_BASE_DIR="$SCRIPT_DIR/results"
 TEMP_DIR="$SCRIPT_DIR/temp_specific_files"
+INTEGRATED_BACKEND_URL="http://localhost:5001"
 
 # Colors for output
 RED='\033[0;31m'
@@ -290,15 +290,80 @@ create_temp_processing_folder() {
     echo "$TEMP_DIR"
 }
 
+# API call to integrated backend
+call_integrated_backend_api() {
+    local temp_folder="$1"
+    local output_dir="$2"
+    local ground_truth_file="$3"
+    local enable_metrics="$4"
+    
+    # Build JSON payload
+    local payload
+    payload=$(cat << EOF
+{
+    "pdf_folder": "$temp_folder",
+    "output_folder": "$output_dir",
+    "options": {
+        "approaches": ["hybrid_rag"],
+        "confidence_threshold": 0.3,
+        "max_pages": 2
+    },
+    "enable_metrics": $enable_metrics
+EOF
+    )
+    
+    # Add ground truth if provided
+    if [[ -n "$ground_truth_file" && -f "$ground_truth_file" ]]; then
+        payload=$(echo "$payload" | sed 's/$/,/' | sed '$s/,$//')
+        payload="$payload,\n    \"ground_truth_file\": \"$ground_truth_file\"\n}"
+    else
+        payload="$payload}"
+    fi
+    
+    info "🔗 Calling integrated backend API..."
+    info "📦 Payload: $(echo -e "$payload" | jq -c '.' 2>/dev/null || echo -e "$payload")"
+    
+    # Make API call
+    local response
+    response=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "$(echo -e "$payload")" \
+        "$INTEGRATED_BACKEND_URL/api/services/hybrid-rag-classification/process-folder")
+    
+    local curl_exit_code=$?
+    
+    if [[ $curl_exit_code -ne 0 ]]; then
+        error "API call failed with curl exit code: $curl_exit_code"
+        return 1
+    fi
+    
+    # Check if response indicates success
+    if echo "$response" | jq -e '.processing_stats' > /dev/null 2>&1; then
+        info "✅ API call successful"
+        return 0
+    else
+        error "API call failed. Response: $response"
+        return 1
+    fi
+}
+
 process_specific_files() {
     local lot_num="$1"
     local files_to_process=("$@")
     shift
-    local enable_llm="$1"
+    local enable_llm="$1" # Currently unused since integrated backend uses hybrid_rag only
     local enable_metrics="$2"
     local output_dir="$3"
     
-    info "🚀 Processing ${#files_to_process[@]} specific files from LOT-$lot_num..."
+    info "🚀 Processing ${#files_to_process[@]} specific files from LOT-$lot_num via integrated backend..."
+    
+    # Check if integrated backend is running
+    if ! curl -s "$INTEGRATED_BACKEND_URL/api/services/health" > /dev/null 2>&1; then
+        error "Integrated backend not running at $INTEGRATED_BACKEND_URL"
+        error "Please start the integrated backend server first:"
+        error "  cd integrated_backend && python api/app.py"
+        return 1
+    fi
     
     # Create temporary processing folder
     local temp_folder
@@ -307,52 +372,33 @@ process_specific_files() {
     # Create output directory
     mkdir -p "$output_dir"
     
-    # Use the unified batch processor for consistency
-    (
-        source "$VENV_DIR/bin/activate"
-        export PYTHONPATH="$SCRIPT_DIR:$PYTHONPATH"
-        
-        # Build the command using unified processor
-        local cmd="python unified_batch_processor.py \"$temp_folder\""
-        
-        # Add output option
-        cmd="$cmd --output \"$output_dir\""
-        
-        # Add approaches based on options
-        if [[ "$enable_llm" == "true" ]]; then
-            cmd="$cmd --approaches hybrid_rag pure_llm"
-        else
-            cmd="$cmd --approaches hybrid_rag"
+    # Try to find ground truth file for the lot
+    local ground_truth_file=""
+    if [[ $lot_num -eq 21 ]]; then
+        local potential_gt="$LOTS_BASE_DIR/Lot 21 to 23/LOT-21/LOT-21.xlsx"
+        if [[ -f "$potential_gt" ]]; then
+            ground_truth_file="$potential_gt"
+            info "📊 Using ground truth file: $potential_gt"
         fi
+    fi
+    
+    # Call integrated backend API
+    if call_integrated_backend_api "$temp_folder" "$output_dir" "$ground_truth_file" "$enable_metrics"; then
+        success "✅ Specific files processing completed successfully"
+        info "📁 Results saved to: $output_dir"
         
-        # Add confidence threshold
-        cmd="$cmd --confidence 0.3"
-        
-        # Add max pages (consistent with lot processing)
-        cmd="$cmd --max-pages 2"
-        
-        # Execute processing
-        info "🔄 Executing: $cmd"
-        eval "$cmd"
-        local exit_code=$?
-        
-        if [[ $exit_code -eq 0 ]]; then
-            success "✅ Specific files processing completed successfully"
-            info "📁 Results saved to: $output_dir"
-            
-            # List the output files for user convenience
-            if [[ -d "$output_dir" ]]; then
-                info "📊 Generated files:"
-                find "$output_dir" -name "*.xlsx" -o -name "*.json" | while read -r result_file; do
-                    echo "  📋 $(basename "$result_file")"
-                done
-            fi
-        else
-            error "❌ Specific files processing failed with exit code $exit_code"
+        # List the output files for user convenience
+        if [[ -d "$output_dir" ]]; then
+            info "📊 Generated files:"
+            find "$output_dir" -name "*.xlsx" -o -name "*.json" | while read -r result_file; do
+                echo "  📋 $(basename "$result_file")"
+            done
         fi
-        
-        return $exit_code
-    )
+        return 0
+    else
+        error "❌ Specific files processing failed"
+        return 1
+    fi
 }
 
 # Main script logic
@@ -450,10 +496,12 @@ main() {
         exit 1
     fi
     
-    # Check virtual environment
-    if [[ ! -d "$VENV_DIR" ]]; then
-        error "Virtual environment not found at $VENV_DIR"
-        exit 1
+    # Check if integrated backend is running
+    if ! curl -s "$INTEGRATED_BACKEND_URL/api/services/health" > /dev/null 2>&1; then
+        warn "Integrated backend not running at $INTEGRATED_BACKEND_URL"
+        info "💡 Will check again when processing (you may start it now)"
+    else
+        info "✅ Integrated backend is running"
     fi
     
     # Handle list-only mode

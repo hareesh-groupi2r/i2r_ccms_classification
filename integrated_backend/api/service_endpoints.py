@@ -1341,7 +1341,28 @@ def process_pdf_folder():
                     # Calculate metrics for each approach using batch processor logic
                     for approach_name in file_result.get('approaches', {}):
                         if approach_name in file_result['approaches']:
-                            predicted_categories = file_result['approaches'][approach_name].get('categories', [])
+                            approach_data = file_result['approaches'][approach_name]
+                            
+                            # Get ALL categories from unified mapper for detected issues (same as results generation)
+                            detected_issues = set()
+                            for cat_detail in approach_data.get('category_details', []):
+                                issue_types = cat_detail.get('issue_types', [])
+                                for issue_type in issue_types:
+                                    detected_issues.add(issue_type)
+                            
+                            # Collect all categories from unified mapper
+                            all_predicted_categories = set()
+                            for issue_type in detected_issues:
+                                mapped_categories = unified_issue_mapper.get_categories_for_issue(issue_type)
+                                if mapped_categories:
+                                    for category, confidence in mapped_categories:
+                                        all_predicted_categories.add(category)
+                            
+                            # If no issues detected, fallback to original categories
+                            if not all_predicted_categories:
+                                all_predicted_categories = set(approach_data.get('categories', []))
+                            
+                            predicted_categories = list(all_predicted_categories)
                             
                             # Filter out "Others" category for metrics calculation
                             gt_categories_filtered = [cat for cat in gt_categories if cat.lower() != 'others']
@@ -1591,28 +1612,34 @@ def _save_batch_results_to_excel(results: Dict, excel_path: Path, ground_truth_f
                             row['Categories with Confidence'] = f'Found {raw_results} semantic results but LLM validation failed'
                             row['RAG Time (s)'] = f"{approach_data['processing_time']:.2f}"
                         else:
-                            # Normal processing - Categories and confidence scores
-                            categories_with_confidence = []
+                            # Collect ALL categories from unified mapper for detected issues (same logic as detailed results)
+                            detected_issues = set()
                             for cat_detail in approach_data.get('category_details', []):
-                                cat = cat_detail.get('category', '')
-                                conf = cat_detail.get('confidence', 0.0)
-                                
-                                # Try to get original LLM confidence if available
-                                original_conf = None
-                                if 'full_result' in approach_data and 'identified_issues' in approach_data['full_result']:
-                                    for issue in approach_data['full_result']['identified_issues']:
-                                        if issue.get('source') == 'llm_validation':
-                                            original_conf = issue.get('original_confidence', None)
-                                            break
-                                
-                                # Format confidence display
-                                if original_conf and original_conf != conf:
-                                    categories_with_confidence.append(f"{cat} ({conf:.3f}, LLM: {original_conf:.3f})")
-                                else:
+                                issue_types = cat_detail.get('issue_types', [])
+                                for issue_type in issue_types:
+                                    detected_issues.add(issue_type)
+                            
+                            # Get all categories from unified mapper for detected issues
+                            all_categories = set()
+                            categories_with_confidence = []
+                            
+                            for issue_type in detected_issues:
+                                mapped_categories = unified_issue_mapper.get_categories_for_issue(issue_type)
+                                if mapped_categories:
+                                    for category, confidence in mapped_categories:
+                                        all_categories.add(category)
+                                        categories_with_confidence.append(f"{category} ({confidence:.3f})")
+                            
+                            # If no issues detected, fallback to original categories
+                            if not all_categories:
+                                for cat_detail in approach_data.get('category_details', []):
+                                    cat = cat_detail.get('category', '')
+                                    conf = cat_detail.get('confidence', 0.0)
+                                    all_categories.add(cat)
                                     categories_with_confidence.append(f"{cat} ({conf:.3f})")
                             
-                            row['Predicted Categories'] = ', '.join(approach_data['categories'])
-                            row['Categories with Confidence'] = ', '.join(categories_with_confidence)
+                            row['Predicted Categories'] = ', '.join(sorted(all_categories))
+                            row['Categories with Confidence'] = ', '.join(sorted(categories_with_confidence))
                             row['RAG Time (s)'] = f"{approach_data['processing_time']:.2f}"
                         
                         # Add metrics if available
@@ -1676,62 +1703,139 @@ def _save_batch_results_to_excel(results: Dict, excel_path: Path, ground_truth_f
                             provider = approach_data.get('error_provider', 'Unknown')
                             raw_results = approach_data.get('raw_semantic_results_count', 0)
                             
+                            error_justification = f'LLM validation failed for {provider}. Found {raw_results} semantic results but could not validate. Error: {error_msg[:200]}...' if len(error_msg) > 200 else f'LLM validation failed for {provider}. Found {raw_results} semantic results but could not validate. Error: {error_msg}'
+                            
                             detailed_row.update({
                                 'Approach': approach_title,
-                                'Predicted Category': 'ERROR: LLM Validation Failed',
-                                'Confidence Score': 0.0,
-                                'Issue Types': f'LLM Error ({provider})',
-                                'Justification': f'LLM validation failed for {provider}. Found {raw_results} semantic results but could not validate. Error: {error_msg[:200]}...' if len(error_msg) > 200 else f'LLM validation failed for {provider}. Found {raw_results} semantic results but could not validate. Error: {error_msg}',
+                                'Issue Type': f'LLM Error ({provider})',
+                                'Predicted Categories': 'ERROR: LLM Validation Failed',
+                                'Confidence Scores': '0.0',
+                                'Text Evidence': 'N/A - LLM validation failed',
+                                'LLM Reasoning': error_justification,
                                 'Processing Time (s)': f"{approach_data['processing_time']:.2f}"
                             })
                             detailed_data.append(detailed_row)
                             
                         elif approach_data.get('category_details'):
+                            # Group by issue types instead of categories for cleaner output
+                            # Build a mapping from issue type to all its categories and confidences
+                            issue_to_categories = {}
+                            
+                            # First, collect all detected issue types
+                            detected_issues = set()
+                            evidence_by_issue = {}
+                            
                             for cat_detail in approach_data['category_details']:
-                                detailed_row = base_info.copy()
-                                
-                                # Get evidence from RAG lookup as justification, truncate if too long
                                 evidence = cat_detail.get('evidence', 'No supporting evidence found in RAG lookup')
-                                # Truncate long evidence and show only the first sentence or first 150 characters
-                                if evidence and len(evidence) > 150:
-                                    sentences = evidence.split('. ')
-                                    justification = sentences[0] + ('.' if len(sentences[0]) < len(evidence) else '') + '...'
-                                else:
-                                    justification = evidence
-                                
-                                # Get issue types that led to this category
                                 issue_types = cat_detail.get('issue_types', [])
-                                issue_types_str = ', '.join(issue_types) if issue_types else 'No issue types found'
                                 
-                                # Try to get original LLM confidence if available
-                                original_conf = None
-                                llm_confidence_note = ''
-                                if 'full_result' in approach_data and 'identified_issues' in approach_data['full_result']:
-                                    for issue in approach_data['full_result']['identified_issues']:
-                                        if issue.get('source') == 'llm_validation':
-                                            original_conf = issue.get('original_confidence', None)
-                                            if original_conf and original_conf != cat_detail.get('confidence', 0.0):
-                                                llm_confidence_note = f" (Original LLM: {original_conf:.3f})"
-                                            break
+                                for issue_type in issue_types:
+                                    detected_issues.add(issue_type)
+                                    if issue_type not in evidence_by_issue:
+                                        evidence_by_issue[issue_type] = evidence
+                            
+                            # For each detected issue type, get ALL categories from unified mapper
+                            for issue_type in detected_issues:
+                                # Get all categories for this issue type from unified mapper
+                                mapped_categories = unified_issue_mapper.get_categories_for_issue(issue_type)
                                 
-                                detailed_row.update({
-                                    'Approach': approach_title,
-                                    'Predicted Category': cat_detail.get('category', ''),
-                                    'Confidence Score': f"{cat_detail.get('confidence', 0.0):.3f}{llm_confidence_note}",
-                                    'Issue Types': issue_types_str,
-                                    'Justification': justification,
-                                    'Processing Time (s)': f"{approach_data['processing_time']:.2f}"
-                                })
-                                detailed_data.append(detailed_row)
+                                if mapped_categories:
+                                    issue_to_categories[issue_type] = {
+                                        'categories': [],
+                                        'evidence': evidence_by_issue.get(issue_type, 'No supporting evidence found')
+                                    }
+                                    
+                                    # Add all mapped categories with their confidence scores
+                                    for category, confidence in mapped_categories:
+                                        issue_to_categories[issue_type]['categories'].append({
+                                            'category': category,
+                                            'confidence': confidence
+                                        })
+                            
+                            # If no issue types found, fall back to category-based rows
+                            if not issue_to_categories:
+                                for cat_detail in approach_data['category_details']:
+                                    detailed_row = base_info.copy()
+                                    
+                                    evidence = cat_detail.get('evidence', 'No supporting evidence found in RAG lookup')
+                                    
+                                    detailed_row.update({
+                                        'Approach': approach_title,
+                                        'Issue Type': 'No issue types found',
+                                        'Predicted Categories': cat_detail.get('category', ''),
+                                        'Confidence Scores': f"{cat_detail.get('confidence', 0.0):.3f}",
+                                        'Text Evidence': evidence,
+                                        'LLM Reasoning': 'Category detected without specific issue type',
+                                        'Processing Time (s)': f"{approach_data['processing_time']:.2f}"
+                                    })
+                                    detailed_data.append(detailed_row)
+                            else:
+                                # Create one row per issue type with all its categories
+                                for issue_type, data in issue_to_categories.items():
+                                    detailed_row = base_info.copy()
+                                    
+                                    # Prepare categories and confidences strings
+                                    categories_list = []
+                                    confidences_list = []
+                                    
+                                    for cat_info in data['categories']:
+                                        categories_list.append(cat_info['category'])
+                                        confidences_list.append(f"{cat_info['confidence']:.3f}")
+                                    
+                                    categories_str = ', '.join(categories_list)
+                                    confidences_str = ', '.join(confidences_list)
+                                    
+                                    # Prepare two separate justification columns
+                                    text_evidence = data['evidence'] if data['evidence'] else 'No supporting evidence found'
+                                    llm_reasoning = ''
+                                    original_conf = None
+                                    llm_confidence_note = ''
+                                    
+                                    # Look for LLM reasoning for this issue type
+                                    if 'full_result' in approach_data and 'identified_issues' in approach_data['full_result']:
+                                        for issue in approach_data['full_result']['identified_issues']:
+                                            if issue.get('issue_type') == issue_type:
+                                                # Get LLM reasoning (addition or replacement)
+                                                llm_addition_reason = issue.get('llm_addition_reason')
+                                                llm_replacement_reason = issue.get('llm_replacement_reason')
+                                                
+                                                if llm_addition_reason:
+                                                    llm_reasoning = f"LLM identified: {llm_addition_reason}"
+                                                elif llm_replacement_reason:
+                                                    llm_reasoning = f"LLM validated: {llm_replacement_reason}"
+                                                else:
+                                                    llm_reasoning = 'Identified via semantic search'
+                                                
+                                                # Get original confidence for LLM issues
+                                                if issue.get('source') == 'llm_validation':
+                                                    original_conf = issue.get('original_confidence', None)
+                                                    if original_conf:
+                                                        llm_confidence_note = f" (Original LLM: {original_conf:.3f})"
+                                                break
+                                    
+                                    if not llm_reasoning:
+                                        llm_reasoning = 'Identified via semantic search only'
+                                    
+                                    detailed_row.update({
+                                        'Approach': approach_title,
+                                        'Issue Type': issue_type,
+                                        'Predicted Categories': categories_str,
+                                        'Confidence Scores': confidences_str + llm_confidence_note,
+                                        'Text Evidence': text_evidence,
+                                        'LLM Reasoning': llm_reasoning,
+                                        'Processing Time (s)': f"{approach_data['processing_time']:.2f}"
+                                    })
+                                    detailed_data.append(detailed_row)
                         else:
                             # No categories found (but no error)
                             detailed_row = base_info.copy()
                             detailed_row.update({
                                 'Approach': approach_title,
-                                'Predicted Category': 'No categories found',
-                                'Confidence Score': 0.0,
-                                'Issue Types': 'N/A',
-                                'Justification': 'No categories were predicted above the confidence threshold',
+                                'Issue Type': 'N/A',
+                                'Predicted Categories': 'No categories found',
+                                'Confidence Scores': '0.0',
+                                'Text Evidence': 'N/A - No categories detected',
+                                'LLM Reasoning': 'No categories were predicted above the confidence threshold',
                                 'Processing Time (s)': f"{approach_data['processing_time']:.2f}"
                             })
                             detailed_data.append(detailed_row)

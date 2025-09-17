@@ -94,10 +94,10 @@ class SyntheticDataGenerator:
             category_raw = str(row.get('category', ''))
             normalized_cats = self.category_normalizer.parse_and_normalize_categories(category_raw)
             
-            # Join normalized categories or use the first one
+            # FIXED: Preserve many-to-many mapping with COMMA separation (like original data)
             if normalized_cats:
-                # For synthetic data generation, use single category (first normalized one)
-                normalized_category = normalized_cats[0]
+                # Preserve all categories to maintain many-to-many relationships using COMMA format
+                normalized_category = ', '.join(normalized_cats)  # Use comma like original data
                 self.df.at[idx, 'category'] = normalized_category
             else:
                 # Fallback to 'Others' if normalization fails
@@ -501,32 +501,40 @@ Focus on variety and realism. Each sample should be distinctly different."""
             if len(issue_samples) == 0:
                 continue
                 
-            # Get the most common category for this issue type (already normalized)
+            # FIXED: Preserve comma-separated categories as complete strings (don't split them)
             categories = issue_samples['category'].tolist()
             
             if not categories:
                 continue
+            
+            # Get unique category combinations (preserve comma-separated format)
+            unique_category_combinations = list(set([str(cat).strip() for cat in categories]))
+            
+            print(f"\nProcessing: {issue_type}")
+            print(f"  Found {len(unique_category_combinations)} unique category combinations:")
+            for combo in unique_category_combinations:
+                print(f"    - {combo}")
+            
+            # Generate samples for each unique category combination
+            samples_per_combination = max(2, target_min_samples // max(1, len(unique_category_combinations)))
+            
+            for category_combination in unique_category_combinations:
+                print(f"  Generating for: {category_combination}")
+                print(f"  Samples per combination: {samples_per_combination}")
                 
-            # Use the most common normalized category
-            most_common_category = max(set(categories), key=categories.count)
-            
-            print(f"\\nProcessing: {issue_type} (Category: {most_common_category})")
-            print(f"  Current samples: {current_count}, Target: {target_min_samples}")
-            
-            # Generate using LLM
-            if use_llm:
-                llm_samples = self.generate_llm_synthetic_data(
-                    issue_type, most_common_category, current_count, target_min_samples
-                )
-                all_synthetic_samples.extend(llm_samples)
-                current_count += len(llm_samples)
-            
-            # Generate using templates if still needed
-            if use_templates and current_count < target_min_samples:
-                template_samples = self.generate_template_based_data(
-                    issue_type, most_common_category, current_count, target_min_samples
-                )
-                all_synthetic_samples.extend(template_samples)
+                # Generate using LLM
+                if use_llm:
+                    llm_samples = self.generate_llm_synthetic_data(
+                        issue_type, category_combination, 0, samples_per_combination
+                    )
+                    all_synthetic_samples.extend(llm_samples)
+                
+                # Generate using templates
+                if use_templates:
+                    template_samples = self.generate_template_based_data(
+                        issue_type, category_combination, 0, samples_per_combination
+                    )
+                    all_synthetic_samples.extend(template_samples)
         
         # Process warning issues (medium priority)
         print(f"\\n🟡 Processing {len(self.warning_issues)} warning issue types...")
