@@ -13,6 +13,7 @@ from collections import defaultdict
 from openai import OpenAI
 import anthropic
 from pathlib import Path
+import inspect
 
 # Import Google Generative AI for fallback support
 try:
@@ -41,7 +42,8 @@ class HybridRAGClassifier:
                  config: Dict,
                  issue_mapper: IssueCategoryMapper,
                  validator: ValidationEngine,
-                 data_analyzer: DataSufficiencyAnalyzer):
+                 data_analyzer: DataSufficiencyAnalyzer,
+                 file_logger: Optional[logging.Logger] = None):
         """
         Initialize Hybrid RAG Classifier.
         
@@ -50,11 +52,16 @@ class HybridRAGClassifier:
             issue_mapper: Issue to category mapper
             validator: Validation engine for preventing hallucinations
             data_analyzer: Data sufficiency analyzer
+            file_logger: Optional per-file logger for detailed debugging
         """
         self.config = config
         self.mapper = issue_mapper
         self.validator = validator
         self.data_analyzer = data_analyzer
+        self.file_logger = file_logger  # Store the per-file logger
+        
+        # Sync validator with unified issue mapper to include all 194+ issue types
+        self.validator.sync_with_issue_mapper(self.mapper)
         
         # Initialize components
         self.preprocessor = TextPreprocessor()
@@ -86,6 +93,18 @@ class HybridRAGClassifier:
         self._initialize_index()
         
         logger.info(f"HybridRAGClassifier initialized with {embedding_model}")
+    
+    def _get_logger(self):
+        """Get the appropriate logger (file logger if available, otherwise default)"""
+        return self.file_logger if self.file_logger else logger
+    
+    def _log_debug(self, message: str):
+        """Log debug message with file and line number info"""
+        frame = inspect.currentframe().f_back
+        filename = os.path.basename(frame.f_code.co_filename)
+        line_no = frame.f_lineno
+        log = self._get_logger()
+        log.debug(f"{message} [{filename}:{line_no}]")
     
     def _init_llm_client(self):
         """
@@ -297,9 +316,9 @@ class HybridRAGClassifier:
             }
         
         # DEBUG: Log input document analysis
-        logger.info(f"🔍 DEEP DEBUG - DOCUMENT ANALYSIS START")
-        logger.info(f"📄 Raw document length: {len(document_text)} chars")
-        logger.info(f"📄 Document preview: '{document_text[:200]}...'") 
+        self._log_debug(f"🔍 DEEP DEBUG - DOCUMENT ANALYSIS START")
+        self._log_debug(f"📄 Raw document length: {len(document_text)} chars")
+        self._log_debug(f"📄 Document preview: '{document_text[:200]}...'") 
         
         # CONDITIONAL QUALITY CHECK: Only apply for documents with poor extraction results
         # Apply quality filtering only if the document appears to have failed proper extraction
@@ -317,33 +336,37 @@ class HybridRAGClassifier:
                     'processing_time': time.time() - start_time
                 }
         else:
-            logger.info(f"✅ QUALITY CHECK: Document passed quality validation (skipped for good extraction)")
+            self._log_debug(f"✅ QUALITY CHECK: Document passed quality validation (skipped for good extraction)")
         
         # Preprocess text
         processed_text = self.preprocessor.normalize_document(document_text)
-        logger.info(f"🔧 Processed text length: {len(processed_text)} chars")
-        logger.info(f"🔧 Processed text preview: '{processed_text[:200]}...'")
+        self._log_debug(f"🔧 Processed text length: {len(processed_text)} chars")
+        self._log_debug(f"🔧 Processed text preview: '{processed_text[:200]}...'")
         
         # Phase 1: Semantic search to find similar issues
-        logger.info(f"🔍 PHASE 1: Starting semantic search...")
+        self._log_debug(f"🔍 PHASE 1: Starting semantic search...")
         similar_issues = self._semantic_search_issues(processed_text)
-        logger.info(f"🔍 PHASE 1: Found {len(similar_issues)} similar issues from semantic search")
-        for i, issue in enumerate(similar_issues[:3]):
-            logger.info(f"   Issue {i+1}: {issue.get('issue_type', 'Unknown')} (conf: {issue.get('confidence', 0):.3f})")
+        self._log_debug(f"🔍 PHASE 1: Found {len(similar_issues)} similar issues from semantic search")
+        for i, issue in enumerate(similar_issues[:5]):
+            self._log_debug(f"   Issue {i+1}: {issue.get('issue_type', 'Unknown')} (conf: {issue.get('confidence', 0):.3f}, evidence: '{issue.get('evidence', '')[:100]}...')")
         
-        # Phase 2: Map identified issues to categories
-        logger.info(f"🗂️  PHASE 2: Mapping {len(similar_issues)} issues to categories...")
+        # Phase 2: Map identified issues to categories - Enhanced to show all mappings
+        self._log_debug(f"🗂️  PHASE 2: Mapping {len(similar_issues)} issues to categories...")
         categories = self.mapper.map_issues_to_categories(similar_issues)
-        logger.info(f"🗂️  PHASE 2: Mapped to {len(categories)} categories")
-        for i, cat in enumerate(categories[:3]):
-            logger.info(f"   Category {i+1}: {cat.get('category', 'Unknown')} (conf: {cat.get('confidence', 0):.3f})")
+        self._log_debug(f"🗂️  PHASE 2: Mapped to {len(categories)} categories")
+        for i, cat in enumerate(categories[:5]):
+            issue_types = cat.get('issue_types', [])
+            self._log_debug(f"   Category {i+1}: {cat.get('category', 'Unknown')} (conf: {cat.get('confidence', 0):.3f}, issues: {len(issue_types)})")
+            # Show which specific issues map to this category
+            for j, issue_type in enumerate(issue_types[:3]):  # Show first 3 issues
+                self._log_debug(f"      └─ Issue {j+1}: {issue_type}")
         
         # Phase 3: LLM validation and refinement
-        logger.info(f"🤖 PHASE 3: Starting LLM validation...")
+        self._log_debug(f"🤖 PHASE 3: Starting LLM validation...")
         if self.llm_client:
-            logger.info(f"🤖 LLM client available, proceeding with validation")
+            self._log_debug(f"🤖 LLM client available, proceeding with validation")
             refined_results = self._llm_validation(processed_text, similar_issues, categories)
-            logger.info(f"🤖 LLM validation completed. Status: {refined_results.get('status', 'unknown')}")
+            self._log_debug(f"🤖 LLM validation completed. Status: {refined_results.get('status', 'unknown')}")
             
             # Check if LLM validation failed
             if refined_results.get('llm_error', False):
@@ -359,21 +382,29 @@ class HybridRAGClassifier:
                     'error_details': refined_results.get('error_details', {})
                 }
         else:
-            logger.warning(f"🤖 No LLM client available - skipping validation")
+            self._log_debug(f"🤖 No LLM client available - skipping validation")
             refined_results = {
                 'identified_issues': similar_issues,
                 'categories': categories
             }
         
-        # Phase 4: Apply validation
-        logger.info(f"✅ PHASE 4: Validating {len(refined_results.get('identified_issues', []))} issues...")
+        # Phase 4: Apply validation (removes hallucinations, checks confidence thresholds)
+        self._log_debug(f"✅ PHASE 4: Validating {len(refined_results.get('identified_issues', []))} issues...")
+        self._log_debug(f"✅ PHASE 4: Validation checks: hallucination detection, confidence thresholds, data sufficiency")
         validated_issues = self._validate_issues(refined_results.get('identified_issues', []))
-        logger.info(f"✅ PHASE 4: {len(validated_issues)} issues passed validation")
+        self._log_debug(f"✅ PHASE 4: {len(validated_issues)} issues passed validation")
+        for i, issue in enumerate(validated_issues[:3]):
+            validation_status = issue.get('validation_status', 'unknown')
+            data_sufficiency = issue.get('data_sufficiency', 'unknown')
+            self._log_debug(f"   Validated Issue {i+1}: {issue.get('issue_type', 'Unknown')} (conf: {issue.get('confidence', 0):.3f}, status: {validation_status}, data: {data_sufficiency})")
         
         # Phase 5: Apply source priority (LLM validation > semantic search)
-        logger.info(f"🔄 PHASE 5: Applying source priority to {len(validated_issues)} issues...")
+        self._log_debug(f"🔄 PHASE 5: Applying source priority to {len(validated_issues)} issues...")
+        self._log_debug(f"🔄 PHASE 5: Priority order: LLM validation > semantic search")
         validated_issues = self._apply_source_priority(validated_issues)
-        logger.info(f"🔄 PHASE 5: After priority filtering: {len(validated_issues)} issues remain")
+        self._log_debug(f"🔄 PHASE 5: After priority filtering: {len(validated_issues)} issues remain")
+        for i, issue in enumerate(validated_issues[:3]):
+            self._log_debug(f"   Priority Issue {i+1}: {issue.get('issue_type', 'Unknown')} (source: {issue.get('source', 'unknown')}, conf: {issue.get('confidence', 0):.3f})")
         
         # Phase 6: Apply confidence-based filtering if enabled
         if self.config.get('enable_confidence_filtering', False):
@@ -849,22 +880,28 @@ CRITICAL RESPONSE FORMAT:
             LLM response text
         """
         # LOG THE EXACT PROMPT FOR ANALYSIS
-        logger.info("="*80)
-        logger.info("HYBRID RAG LLM PROMPT ANALYSIS")
-        logger.info("="*80)
-        logger.info(f"Model: {self.llm_model}")
-        logger.info(f"Temperature: 0.1")
-        logger.info(f"Max Tokens: 1000")
-        logger.info("PROMPT CONTENT:")
-        logger.info("-"*60)
-        logger.info(prompt)
-        logger.info("-"*60)
+        log = self._get_logger()
+        log.debug("="*80)
+        self._log_debug("🤖 PHASE 3 - LLM CALL DETAILS")
+        log.debug("="*80)
+        self._log_debug(f"🔧 Model: {self.llm_model}")
+        self._log_debug(f"🔧 Temperature: 0.0 (deterministic)")
+        self._log_debug(f"🔧 Max Tokens: 1000")
+        self._log_debug(f"🔧 Seed: 42 (for reproducibility)")
+        self._log_debug(f"🔧 Response Format: JSON object")
+        self._log_debug(f"🔧 System Message: You are a contract classification expert.")
+        self._log_debug("📝 PROMPT CONTENT:")
+        log.debug("-"*60)
+        log.debug(prompt)
+        log.debug("-"*60)
         
         # Try primary LLM client first
         primary_provider = self._get_provider_name_from_model(self.llm_model)
         try:
             response_content = self._call_single_llm(self.llm_client, self.llm_model, prompt)
-            logger.info(f"✅ Primary LLM ({primary_provider}) succeeded")
+            self._log_debug(f"✅ Primary LLM ({primary_provider}) succeeded")
+            self._log_debug(f"📤 LLM Response length: {len(response_content)} chars")
+            self._log_debug(f"📤 LLM Response preview: {response_content[:200]}...")
             return response_content
             
         except Exception as primary_error:

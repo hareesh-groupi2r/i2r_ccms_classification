@@ -125,7 +125,7 @@ def setup_per_file_logger(pdf_file_name: str, output_folder: str):
     
     # Create file handler
     file_handler = logging.FileHandler(log_path, mode='w', encoding='utf-8')
-    file_handler.setLevel(logging.INFO)
+    file_handler.setLevel(logging.DEBUG)
     
     # Create formatter
     formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -133,7 +133,7 @@ def setup_per_file_logger(pdf_file_name: str, output_folder: str):
     
     # Add handler to logger
     file_logger.addHandler(file_handler)
-    file_logger.setLevel(logging.INFO)
+    file_logger.setLevel(logging.DEBUG)
     file_logger.propagate = True  # Still send to main logger
     
     return file_logger, log_path
@@ -1200,8 +1200,17 @@ def process_pdf_folder():
                         dual_log(logger, file_logger, 'info', f"  🔍 Classifying with Hybrid RAG approach...")
                     
                     approach_start = time.time()
+                    
+                    # Temporarily set the file logger for detailed debugging
+                    original_file_logger = getattr(classification_service.hybrid_rag_classifier, 'file_logger', None)
+                    if create_per_file_logs and file_logger:
+                        classification_service.hybrid_rag_classifier.file_logger = file_logger
+                    
                     approach_result = classification_service.hybrid_rag_classifier.classify(focused_content, is_file_path=False)
                     approach_time = time.time() - approach_start
+                    
+                    # Restore original file logger
+                    classification_service.hybrid_rag_classifier.file_logger = original_file_logger
                     
                     if log_classification_details:
                         logger.info(f"✅ Classification completed:")
