@@ -1653,6 +1653,7 @@ def _save_batch_results_to_excel(results: Dict, excel_path: Path, ground_truth_f
                             row['False Positives'] = int(metrics.get('fp', 0)) if metrics.get('fp') is not None else None
                             row['False Negatives'] = int(metrics.get('fn', 0)) if metrics.get('fn') is not None else None
                             row['False Negatives List'] = ', '.join(metrics.get('missed_categories', [])) if metrics.get('missed_categories') else ''
+                            row['False Positives List'] = ', '.join(metrics.get('extra_categories', [])) if metrics.get('extra_categories') else ''
                             row['Jaccard Similarity'] = round(metrics.get('jaccard_similarity', 0), 2) if metrics.get('jaccard_similarity') is not None else None
                     
                     summary_data.append(row)
@@ -1786,7 +1787,33 @@ def _save_batch_results_to_excel(results: Dict, excel_path: Path, ground_truth_f
                                     confidences_str = ', '.join(confidences_list)
                                     
                                     # Prepare two separate justification columns
+                                    # Try to find the complete chunk that led to this issue type detection
                                     text_evidence = data['evidence'] if data['evidence'] else 'No supporting evidence found'
+                                    
+                                    # Enhance text evidence with complete chunk if available
+                                    if 'full_result' in approach_data and 'chunk_debug_data' in approach_data['full_result']:
+                                        chunk_debug_data = approach_data['full_result']['chunk_debug_data']
+                                        
+                                        # Find the chunk that contains this issue type
+                                        best_chunk_text = None
+                                        best_chunk_relevance = 0
+                                        
+                                        for chunk_data in chunk_debug_data:
+                                            chunk_issues = chunk_data.get('issues_list', '')
+                                            chunk_text = chunk_data.get('chunk_text', '')
+                                            
+                                            # Check if this chunk contributed to the current issue type
+                                            if issue_type in chunk_issues:
+                                                # Calculate relevance score based on similarity and position
+                                                relevance = chunk_data.get('avg_similarity', 0) * (1 + chunk_data.get('unique_issues_found', 0) / 10)
+                                                
+                                                if relevance > best_chunk_relevance and chunk_text:
+                                                    best_chunk_relevance = relevance
+                                                    best_chunk_text = chunk_text
+                                        
+                                        # If we found a relevant chunk, use it as text evidence
+                                        if best_chunk_text:
+                                            text_evidence = f"Complete chunk: {best_chunk_text}"
                                     llm_reasoning = ''
                                     original_conf = None
                                     llm_confidence_note = ''
