@@ -410,16 +410,49 @@ class HybridRAGClassifier:
         if self.config.get('enable_confidence_filtering', False):
             validated_issues = self._apply_confidence_filtering(validated_issues)
         
-        # CRITICAL FIX: Always re-map categories from validated issues only
-        # This ensures categories are only returned if they have valid underlying issues
-        # Phase 6: CRITICAL FIX - Always re-map categories from validated issues only
-        logger.info(f"🔄 PHASE 6: Re-mapping categories from {len(validated_issues)} validated issues...")
+        # ENHANCED FIX: Preserve categories from both semantic search AND validated issues
+        # This ensures we don't lose 1-to-many mappings when LLM removes/replaces issues
+        logger.info(f"🔄 PHASE 6: Enhanced category mapping preserving semantic search mappings...")
+        
+        # Get categories from validated issues
+        validated_categories = []
         if validated_issues:
             validated_categories = self.mapper.map_issues_to_categories(validated_issues)
-            logger.info(f"🔄 PHASE 6: Generated {len(validated_categories)} categories from validated issues")
-        else:
-            validated_categories = []
-            logger.info(f"🔄 PHASE 6: No validated issues - returning 0 categories")
+            logger.info(f"🔄 PHASE 6: Generated {len(validated_categories)} categories from {len(validated_issues)} validated issues")
+        
+        # CRITICAL: Also preserve categories from original semantic search
+        # This prevents loss of 1-to-many mappings when LLM removes issues
+        semantic_categories = categories  # This is from Phase 2
+        logger.info(f"🔄 PHASE 6: Preserving {len(semantic_categories)} categories from semantic search")
+        
+        # Merge categories, giving priority to validated categories for confidence
+        final_categories = {}
+        
+        # First add semantic search categories
+        for cat in semantic_categories:
+            cat_name = cat['category']
+            final_categories[cat_name] = cat.copy()
+            final_categories[cat_name]['source'] = 'semantic_search'
+        
+        # Then overlay validated categories (higher priority)
+        for cat in validated_categories:
+            cat_name = cat['category']
+            if cat_name in final_categories:
+                # Category exists from semantic search - use higher confidence
+                if cat['confidence'] > final_categories[cat_name]['confidence']:
+                    final_categories[cat_name] = cat.copy()
+                    final_categories[cat_name]['source'] = 'llm_validation'
+                else:
+                    # Keep semantic search but mark as enhanced
+                    final_categories[cat_name]['source'] = 'semantic_search_preserved'
+            else:
+                # New category from LLM validation
+                final_categories[cat_name] = cat.copy()
+                final_categories[cat_name]['source'] = 'llm_validation'
+        
+        # Convert back to list format
+        validated_categories = list(final_categories.values())
+        logger.info(f"🔄 PHASE 6: Final merged categories: {len(validated_categories)} (preserves 1-to-many mappings)")
         
         # Phase 7: Apply data sufficiency adjustments
         result = {
