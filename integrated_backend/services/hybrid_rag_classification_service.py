@@ -76,25 +76,44 @@ class HybridRAGClassificationService:
         if not self.config_manager.validate_config():
             raise RuntimeError("Classification system configuration validation failed")
         
-        # Determine training data path
+        # Determine training data path with priority order
         training_paths = [
+            # Priority 1: Enhanced training data with synthetic samples
+            str(classification_path / 'data' / 'synthetic' / 'enhanced_training_claude_*.xlsx'),
+            str(classification_path / 'data' / 'synthetic' / 'enhanced_training_priority_*.xlsx'),
+            # Priority 2: Combined training data (original + existing synthetic)
             str(classification_path / 'data' / 'synthetic' / 'combined_training_data.xlsx'),
+            # Priority 3: Raw consolidated data (fallback)
             str(classification_path / 'data' / 'raw' / 'Consolidated_labeled_data.xlsx')
         ]
         
         training_data_path = None
-        for path in training_paths:
-            if Path(path).exists():
-                training_data_path = path
+        for path_pattern in training_paths:
+            if '*' in path_pattern:
+                # Handle wildcard patterns - get the most recent
+                import glob
+                matching_files = glob.glob(path_pattern)
+                if matching_files:
+                    # Sort by modification time, get most recent
+                    training_data_path = max(matching_files, key=lambda x: Path(x).stat().st_mtime)
+                    break
+            elif Path(path_pattern).exists():
+                training_data_path = path_pattern
                 break
         
         if not training_data_path:
             raise FileNotFoundError(f"Training data not found in expected locations: {training_paths}")
         
         logger.info(f"Using training data: {training_data_path}")
+        logger.info(f"Training data file size: {Path(training_data_path).stat().st_size:,} bytes")
         
         # Initialize core components with unified mapper
-        unified_mapping_path = str(classification_path / 'unified_issue_category_mapping.xlsx')
+        unified_mapping_path = str(classification_path / 'issue_category_mapping_diffs' / 'unified_issue_category_mapping.xlsx')
+        
+        # Verify unified mapping file exists
+        if not Path(unified_mapping_path).exists():
+            raise FileNotFoundError(f"Unified mapping file not found: {unified_mapping_path}")
+        
         self.issue_mapper = UnifiedIssueCategoryMapper(
             training_data_path=training_data_path,
             mapping_file_path=unified_mapping_path
@@ -102,8 +121,12 @@ class HybridRAGClassificationService:
         self.validator = ValidationEngine(training_data_path)
         self.data_analyzer = DataSufficiencyAnalyzer(training_data_path)
         
-        logger.info(f"Loaded {len(self.issue_mapper.get_all_issue_types())} issue types")
-        logger.info(f"Loaded {len(self.issue_mapper.get_all_categories())} categories")
+        # Sync ValidationEngine with complete issue mapper (critical for LLM prompts)
+        self.validator.sync_with_issue_mapper(self.issue_mapper)
+        
+        logger.info(f"🔄 Loaded {len(self.issue_mapper.get_all_issue_types())} issue types from unified mapper")
+        logger.info(f"🔄 Loaded {len(self.issue_mapper.get_all_categories())} categories")
+        logger.info(f"🔄 ValidationEngine synced with {len(self.validator.valid_issue_types)} issue types")
         
         # Initialize classifiers based on enabled approaches
         enabled_approaches = self.config_manager.get_enabled_approaches()
@@ -123,14 +146,53 @@ class HybridRAGClassificationService:
                 data_analyzer=self.data_analyzer
             )
             
-            # Build or load vector index
+            # Build or load vector index with comprehensive checks
             index_path = classification_path / 'data' / 'embeddings' / 'rag_index'
-            if not index_path.with_suffix('.faiss').exists():
-                logger.info("Building vector index for RAG approach...")
-                self.hybrid_rag_classifier.build_index(training_data_path, save_path=str(index_path))
-                logger.info("Vector index built and saved")
+            faiss_file = index_path.with_suffix('.faiss')
+            pkl_file = index_path.with_suffix('.pkl')
+            
+            # Check if index exists and is valid
+            index_needs_rebuild = False
+            if not faiss_file.exists() or not pkl_file.exists():
+                index_needs_rebuild = True
+                logger.info("📊 Vector index files missing - will build fresh index")
             else:
-                logger.info("Using existing vector index")
+                # Check if training data is newer than index
+                training_modified = Path(training_data_path).stat().st_mtime
+                index_modified = faiss_file.stat().st_mtime
+                if training_modified > index_modified:
+                    index_needs_rebuild = True
+                    logger.info("📊 Training data is newer than vector index - will rebuild")
+                else:
+                    logger.info("📊 Using existing vector index")
+            
+            if index_needs_rebuild:
+                logger.info("🔨 Building vector index for RAG approach...")
+                # Ensure embeddings directory exists
+                index_path.parent.mkdir(parents=True, exist_ok=True)
+                
+                # Build the index
+                self.hybrid_rag_classifier.build_index(training_data_path, save_path=str(index_path))
+                
+                # Verify the built index
+                if faiss_file.exists() and pkl_file.exists():
+                    # Load and check the index
+                    import pickle
+                    with open(str(pkl_file), 'rb') as f:
+                        metadata = pickle.load(f)
+                    
+                    if isinstance(metadata, dict) and 'texts' in metadata:
+                        doc_count = len(metadata['texts'])
+                    elif isinstance(metadata, list):
+                        doc_count = len(metadata)
+                    else:
+                        doc_count = "unknown"
+                    
+                    logger.info(f"✅ Vector index built successfully with {doc_count} documents")
+                    logger.info(f"📁 Index files: {faiss_file.stat().st_size:,} bytes (FAISS), {pkl_file.stat().st_size:,} bytes (metadata)")
+                else:
+                    logger.error("❌ Vector index build failed - files not created")
+                    raise RuntimeError("Vector index build failed")
         
         if 'pure_llm' in enabled_approaches:
             config = self.config_manager.get_approach_config('pure_llm')
