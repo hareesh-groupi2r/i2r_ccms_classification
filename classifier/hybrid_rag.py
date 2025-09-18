@@ -420,39 +420,52 @@ class HybridRAGClassifier:
             validated_categories = self.mapper.map_issues_to_categories(validated_issues)
             logger.info(f"🔄 PHASE 6: Generated {len(validated_categories)} categories from {len(validated_issues)} validated issues")
         
-        # CRITICAL: Also preserve categories from original semantic search
-        # This prevents loss of 1-to-many mappings when LLM removes issues
+        # REFINED FIX: Only preserve semantic categories that have validated issue backing
+        # This prevents false positives while maintaining 1-to-many mappings for valid issues
         semantic_categories = categories  # This is from Phase 2
-        logger.info(f"🔄 PHASE 6: Preserving {len(semantic_categories)} categories from semantic search")
+        logger.info(f"🔄 PHASE 6: Analyzing {len(semantic_categories)} semantic categories vs {len(validated_issues)} validated issues")
         
-        # Merge categories, giving priority to validated categories for confidence
+        # Get issue types from validated issues for filtering
+        validated_issue_types = set(issue['issue_type'] for issue in validated_issues)
+        logger.info(f"🔄 PHASE 6: Validated issue types: {validated_issue_types}")
+        
+        # Merge categories intelligently
         final_categories = {}
         
-        # First add semantic search categories
-        for cat in semantic_categories:
-            cat_name = cat['category']
-            final_categories[cat_name] = cat.copy()
-            final_categories[cat_name]['source'] = 'semantic_search'
-        
-        # Then overlay validated categories (higher priority)
+        # Start with validated categories (highest priority)
         for cat in validated_categories:
             cat_name = cat['category']
-            if cat_name in final_categories:
-                # Category exists from semantic search - use higher confidence
-                if cat['confidence'] > final_categories[cat_name]['confidence']:
+            final_categories[cat_name] = cat.copy()
+            final_categories[cat_name]['source'] = 'llm_validation'
+        
+        # Then selectively add semantic categories only if they have validated issue backing
+        preserved_count = 0
+        for cat in semantic_categories:
+            cat_name = cat['category']
+            
+            # Check if this category has any validated issues backing it
+            has_validated_backing = False
+            for source_issue in cat.get('source_issues', []):
+                if source_issue.get('issue_type') in validated_issue_types:
+                    has_validated_backing = True
+                    break
+            
+            if has_validated_backing:
+                if cat_name not in final_categories:
+                    # New category with validated backing - preserve it
                     final_categories[cat_name] = cat.copy()
-                    final_categories[cat_name]['source'] = 'llm_validation'
-                else:
-                    # Keep semantic search but mark as enhanced
-                    final_categories[cat_name]['source'] = 'semantic_search_preserved'
+                    final_categories[cat_name]['source'] = 'semantic_search_validated'
+                    preserved_count += 1
+                elif final_categories[cat_name].get('confidence', 0) < cat.get('confidence', 0):
+                    # Use higher confidence version but keep LLM source priority
+                    final_categories[cat_name]['confidence'] = cat['confidence']
+                    final_categories[cat_name]['source'] = 'hybrid_validated'
             else:
-                # New category from LLM validation
-                final_categories[cat_name] = cat.copy()
-                final_categories[cat_name]['source'] = 'llm_validation'
+                logger.info(f"🔄 PHASE 6: Filtering out '{cat_name}' - no validated issue backing")
         
         # Convert back to list format
         validated_categories = list(final_categories.values())
-        logger.info(f"🔄 PHASE 6: Final merged categories: {len(validated_categories)} (preserves 1-to-many mappings)")
+        logger.info(f"🔄 PHASE 6: Final categories: {len(validated_categories)} (LLM: {len([c for c in validated_categories if 'llm' in c.get('source', '')])}, Preserved: {preserved_count})")
         
         # Phase 7: Apply data sufficiency adjustments
         result = {
@@ -621,9 +634,21 @@ class HybridRAGClassifier:
         # Apply confidence decay for ranking and quality filtering
         identified_issues = self._apply_quality_filtering(identified_issues)
         
-        # Keep top issues (to avoid noise)
-        max_issues = self.config.get('max_issues', 5)
+        # Keep top issues (to avoid noise) - Scale based on document length
+        base_max_issues = self.config.get('max_issues', 5)
+        
+        # Document-length scaling: shorter docs get fewer issues to prevent over-classification
+        doc_length = len(text) if text else 1000
+        if doc_length < 1000:
+            max_issues = max(2, base_max_issues - 2)  # Min 2, reduce by 2 for short docs
+        elif doc_length < 2000:
+            max_issues = max(3, base_max_issues - 1)  # Min 3, reduce by 1 for medium docs
+        else:
+            max_issues = base_max_issues  # Full limit for long docs
+        
         identified_issues = identified_issues[:max_issues]
+        
+        logger.info(f"🔧 Document length: {doc_length} chars → max_issues: {max_issues} (base: {base_max_issues})")
         
         # LOG VECTOR SEARCH RESULTS FOR ANALYSIS
         logger.info("+"*80)
