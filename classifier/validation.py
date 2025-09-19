@@ -77,6 +77,27 @@ class ValidationEngine:
             logger.error(f"Error loading valid values from {data_path}: {e}")
             raise
     
+    def sync_with_issue_mapper(self, issue_mapper):
+        """
+        Synchronize valid issue types with the unified issue mapper.
+        This ensures the LLM validation uses the complete set of 194+ issue types.
+        
+        Args:
+            issue_mapper: UnifiedIssueCategoryMapper instance
+        """
+        # Get all issue types from the unified mapper (194+)
+        all_issue_types = issue_mapper.get_all_issue_types()
+        all_categories = issue_mapper.get_all_categories()
+        
+        # Update the validation constraints
+        self.valid_issue_types = set(all_issue_types)
+        self.valid_categories = set(all_categories)
+        
+        logger.info(f"🔄 Synced ValidationEngine with UnifiedIssueCategoryMapper:")
+        logger.info(f"   📋 Issue types: {len(self.valid_issue_types)} (was limited to training data only)")
+        logger.info(f"   📋 Categories: {len(self.valid_categories)}")
+        logger.info(f"   ✅ LLM prompts will now include complete issue type list")
+    
     def validate_issue_type(self, issue_type: str, 
                            auto_correct: bool = True) -> Tuple[Optional[str], bool, float]:
         """

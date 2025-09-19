@@ -103,7 +103,7 @@ def test_pure_llm_classifier(config_manager, components):
     
     # Check for API key
     if not config.get('api_key'):
-        print("API key not found. Please set OPENAI_API_KEY or ANTHROPIC_API_KEY in .env")
+        print("API key not found. Please set OPENAI_API_KEY or CLAUDE_API_KEY in .env")
         return
     
     # Initialize classifier

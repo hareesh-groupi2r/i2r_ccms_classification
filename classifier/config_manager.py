@@ -139,7 +139,7 @@ class ConfigManager:
             if 'gpt' in config.get('model', '').lower():
                 config['api_key'] = os.getenv('OPENAI_API_KEY')
             elif 'claude' in config.get('model', '').lower():
-                config['api_key'] = os.getenv('ANTHROPIC_API_KEY')
+                config['api_key'] = os.getenv('CLAUDE_API_KEY')
         
         elif approach == 'hybrid_rag':
             if 'gpt' in config.get('llm_model', '').lower():
@@ -266,7 +266,7 @@ class ConfigManager:
                 if 'gpt' in model.lower() and not os.getenv('OPENAI_API_KEY'):
                     logger.error("OpenAI API key required for GPT models")
                     return False
-                elif 'claude' in model.lower() and not os.getenv('ANTHROPIC_API_KEY'):
+                elif 'claude' in model.lower() and not os.getenv('CLAUDE_API_KEY'):
                     logger.error("Anthropic API key required for Claude models")
                     return False
         

@@ -98,7 +98,7 @@ setup_environment() {
         cat > "$PROJECT_DIR/.env" << EOF
 # API Keys
 OPENAI_API_KEY=your-openai-key-here
-ANTHROPIC_API_KEY=your-anthropic-key-here
+CLAUDE_API_KEY=your-anthropic-key-here
 GEMINI_API_KEY=your-gemini-key-here
 
 # Server Configuration

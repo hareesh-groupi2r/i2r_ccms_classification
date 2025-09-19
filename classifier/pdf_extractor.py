@@ -178,6 +178,16 @@ class PDFExtractor:
             
             # Apply OCR to the page
             page_text = pytesseract.image_to_string(images[0])
+            
+            # Clean up images to free resources
+            for image in images:
+                try:
+                    if hasattr(image, 'close'):
+                        image.close()
+                except Exception:
+                    pass
+            images.clear()
+            
             return self._clean_ocr_text(page_text)
             
         except Exception as e:
@@ -297,6 +307,16 @@ class PDFExtractor:
                             
                     except Exception as e:
                         logger.warning(f"Error in OCR for page {i+1}: {e}")
+                    finally:
+                        # Explicitly close image to free resources
+                        try:
+                            if hasattr(image, 'close'):
+                                image.close()
+                        except Exception:
+                            pass
+                
+                # Clear images list to help with garbage collection
+                images.clear()
                 
                 if text_pages:
                     method = f"tesseract_ocr({total_pages}pages)" if self.max_pages else "tesseract_ocr"

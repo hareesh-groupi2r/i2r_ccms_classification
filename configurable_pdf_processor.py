@@ -93,7 +93,7 @@ def classify_with_api(text: str, filename: str) -> dict:
         "text": text,
         "approach": "hybrid_rag",  # Use hybrid_rag as it's more reliable
         "confidence_threshold": 0.3,
-        "max_results": 5
+        "max_results": 7
     }
     
     try:

@@ -12,7 +12,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_DIR="$SCRIPT_DIR/venv"
 LOTS_BASE_DIR="$SCRIPT_DIR/data/Lots21-27"
 RESULTS_BASE_DIR="$SCRIPT_DIR/results"
-PYTHON_SCRIPT="process_batch_lots.py"
+INTEGRATED_BACKEND_URL="http://localhost:5001"
+BACKEND_SCRIPT="$SCRIPT_DIR/start_integrated_backend.sh"
 
 # Colors for output
 RED='\033[0;31m'
@@ -164,250 +165,130 @@ process_lot() {
     # Create output directory
     mkdir -p "$output_dir"
     
-    # Create Python script if it doesn't exist
-    if [[ ! -f "$SCRIPT_DIR/$PYTHON_SCRIPT" ]]; then
-        info "Creating Python batch processing script..."
-        cat > "$SCRIPT_DIR/$PYTHON_SCRIPT" << 'PYTHON_EOF'
-#!/usr/bin/env python3
-"""
-Batch processing script for individual lots with custom file limiting
-"""
-
-import sys
-import os
-from pathlib import Path
-import argparse
-import logging
-import glob
-
-# Add project root to path
-sys.path.insert(0, str(Path(__file__).parent))
-
-from batch_processor import BatchPDFProcessor
-import yaml
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
-
-def create_custom_batch_config(pdf_folder, ground_truth_file, enable_llm, enable_metrics, limit_files):
-    """Create a custom batch configuration with proper ground truth handling."""
-    
-    # Create temporary batch config with explicit ground truth handling
-    config = {
-        'batch_processing': {
-            'enabled': True,
-            'approaches': {
-                'hybrid_rag': {'enabled': True, 'priority': 1},
-                'pure_llm': {'enabled': enable_llm, 'priority': 2}
-            },
-            'evaluation': {
-                'enabled': enable_metrics,
-                # Set auto_detect to False when ground truth is explicitly provided
-                'auto_detect_ground_truth': ground_truth_file is None,
-                'ground_truth_patterns': ["EDMS*.xlsx", "LOT-*.xlsx", "ground_truth*.xlsx", "*_labels.xlsx"]
-            },
-            'output': {
-                'results_folder': 'results',
-                'save_format': 'xlsx'
-            },
-            'processing': {
-                'max_pages_per_pdf': 2,
-                'skip_on_error': True,
-                'rate_limit_delay': 1  # Reduced for testing
-            }
-        }
+    # Check if integrated backend is running
+    check_backend_running() {
+        if command -v curl >/dev/null 2>&1; then
+            if curl -s "$INTEGRATED_BACKEND_URL/api/services/health" >/dev/null 2>&1; then
+                return 0
+            fi
+        fi
+        return 1
     }
     
-    # Add file limiting if specified
-    if limit_files:
-        config['batch_processing']['processing']['max_files'] = limit_files
-    
-    return config
-
-def get_pdf_files(pdf_folder, limit=None):
-    """Get list of PDF files, optionally limited to first N files."""
-    pdf_folder = Path(pdf_folder)
-    pdf_files = sorted(pdf_folder.glob("*.pdf"))
-    
-    if limit:
-        pdf_files = pdf_files[:limit]
-        logger.info(f"📄 Limited to first {limit} files out of {len(sorted(pdf_folder.glob('*.pdf')))} total")
-    
-    return pdf_files
-
-def main():
-    parser = argparse.ArgumentParser(description='Process a lot of PDFs for classification')
-    parser.add_argument('--pdf-folder', required=True, help='Path to folder containing PDF files')
-    parser.add_argument('--ground-truth', help='Path to ground truth Excel file (optional)')
-    parser.add_argument('--output-folder', required=True, help='Output folder for results')
-    parser.add_argument('--lot-name', required=True, help='Name of the lot for logging')
-    parser.add_argument('--enable-llm', action='store_true', help='Enable Pure LLM approach')
-    parser.add_argument('--disable-metrics', action='store_true', help='Disable metrics calculation')
-    parser.add_argument('--limit', type=int, help='Process only first N files')
-    
-    args = parser.parse_args()
-    
-    logger.info(f"🚀 Starting batch processing for {args.lot_name}")
-    logger.info(f"📁 PDF Folder: {args.pdf_folder}")
-    logger.info(f"📊 Ground Truth: {args.ground_truth or 'Auto-detect'}")
-    logger.info(f"📁 Output Folder: {args.output_folder}")
-    logger.info(f"🤖 LLM Approach: {'Enabled' if args.enable_llm else 'Disabled (Hybrid RAG only)'}")
-    logger.info(f"📈 Metrics: {'Disabled' if args.disable_metrics else 'Enabled'}")
-    if args.limit:
-        logger.info(f"📄 File Limit: First {args.limit} files")
-    
-    try:
-        # Check if ground truth file exists and validate it
-        if args.ground_truth:
-            if Path(args.ground_truth).exists():
-                logger.info(f"✅ Ground truth file verified: {args.ground_truth}")
-            else:
-                logger.warning(f"⚠️  Ground truth file not found: {args.ground_truth}")
-                logger.info(f"📊 Will attempt auto-detection in PDF folder")
-                args.ground_truth = None
-        else:
-            logger.info(f"📊 No ground truth file provided - will attempt auto-detection")
+    # Start backend if not running
+    if ! check_backend_running; then
+        warn "Integrated backend is not running. Starting it..."
+        "$BACKEND_SCRIPT" --force >/dev/null 2>&1 &
         
-        # Get PDF files with optional limit
-        pdf_files = get_pdf_files(args.pdf_folder, args.limit)
-        if not pdf_files:
-            logger.error(f"❌ No PDF files found in {args.pdf_folder}")
+        # Wait for backend to start
+        local retries=0
+        while ! check_backend_running && [ $retries -lt 30 ]; do
+            sleep 2
+            retries=$((retries + 1))
+        done
+        
+        if ! check_backend_running; then
+            error "Failed to start integrated backend after 60 seconds"
             return 1
+        fi
         
-        logger.info(f"📄 Found {len(pdf_files)} PDF files to process")
-        
-        # Create custom batch configuration
-        batch_config = create_custom_batch_config(
-            args.pdf_folder, 
-            args.ground_truth, 
-            args.enable_llm, 
-            not args.disable_metrics,
-            args.limit
-        )
-        
-        # Save temporary config
-        temp_config_path = Path("temp_single_lot_config.yaml")
-        with open(temp_config_path, 'w') as f:
-            yaml.dump(batch_config, f, default_flow_style=False)
-        
-        # Initialize batch processor with custom config
-        processor = BatchPDFProcessor(
-            config_path="config.yaml",
-            batch_config_path=str(temp_config_path)
-        )
-        
-        # Create a temporary folder with limited files if needed
-        actual_pdf_folder = args.pdf_folder
-        temp_folder = None
-        
-        if args.limit:
-            import shutil
-            temp_folder = Path(f"temp_limited_lot_{args.lot_name}")
-            temp_folder.mkdir(exist_ok=True)
-            
-            # Copy only the first N PDF files
-            pdf_files = get_pdf_files(args.pdf_folder, args.limit)
-            for pdf_file in pdf_files:
-                shutil.copy2(pdf_file, temp_folder / pdf_file.name)
-            
-            # Copy ground truth file if it exists in the original folder
-            if args.ground_truth and Path(args.ground_truth).exists():
-                shutil.copy2(args.ground_truth, temp_folder / Path(args.ground_truth).name)
-                args.ground_truth = str(temp_folder / Path(args.ground_truth).name)
-            
-            actual_pdf_folder = str(temp_folder)
-            logger.info(f"📄 Created temporary folder with {len(pdf_files)} files: {actual_pdf_folder}")
-        
-        # Process the lot
-        logger.info(f"🔄 Processing {args.lot_name}...")
-        results = processor.process_pdf_folder(
-            pdf_folder=actual_pdf_folder,
-            ground_truth_file=args.ground_truth,
-            output_folder=args.output_folder
-        )
-        
-        # Clean up temporary folder if created
-        if temp_folder and temp_folder.exists():
-            shutil.rmtree(temp_folder)
-            logger.info(f"🧹 Cleaned up temporary folder")
-        
-        # Clean up temporary config
-        if temp_config_path.exists():
-            temp_config_path.unlink()
-        
-        # Log results summary
-        stats = results.get('processing_stats', {})
-        logger.info(f"✅ {args.lot_name} processing completed:")
-        logger.info(f"   📄 Total files: {stats.get('total_files', 0)}")
-        logger.info(f"   ✅ Processed: {stats.get('processed_files', 0)}")
-        logger.info(f"   ❌ Failed: {stats.get('failed_files', 0)}")
-        
-        if 'overall_metrics' in results:
-            metrics = results['overall_metrics']
-            for approach, metric_data in metrics.items():
-                logger.info(f"   📊 {approach.replace('_', ' ').title()} Metrics:")
-                logger.info(f"      F1-Score: {metric_data.get('micro_f1', 'N/A'):.3f}")
-                logger.info(f"      Precision: {metric_data.get('micro_precision', 'N/A'):.3f}")
-                logger.info(f"      Recall: {metric_data.get('micro_recall', 'N/A'):.3f}")
-        
-        logger.info(f"📁 Results saved to: {args.output_folder}")
-        return 0
-        
-    except Exception as e:
-        logger.error(f"❌ Error processing {args.lot_name}: {e}")
-        import traceback
-        traceback.print_exc()
-        return 1
-
-if __name__ == "__main__":
-    sys.exit(main())
-PYTHON_EOF
-        chmod +x "$SCRIPT_DIR/$PYTHON_SCRIPT"
+        info "✅ Integrated backend started successfully"
+    else
+        info "✅ Integrated backend is already running"
     fi
     
-    # Activate virtual environment and run processing
+    # Call integrated backend API for batch processing
     (
-        source "$VENV_DIR/bin/activate"
-        export PYTHONPATH="$SCRIPT_DIR:$PYTHONPATH"
-        
-        # Build command
-        local cmd="python $PYTHON_SCRIPT --pdf-folder \"$lot_dir\" --output-folder \"$output_dir\" --lot-name \"LOT-$lot_num\""
+        # Build JSON payload
+        local payload="{"
+        payload="$payload\"pdf_folder\": \"$lot_dir\""
         
         # Add ground truth if available
         if [[ -n "$ground_truth" && -f "$ground_truth" ]]; then
-            cmd="$cmd --ground-truth \"$ground_truth\""
+            payload="$payload, \"ground_truth_file\": \"$ground_truth\""
         fi
+        
+        # Add output folder
+        payload="$payload, \"output_folder\": \"$output_dir\""
         
         # Add options
+        payload="$payload, \"options\": {"
+        
+        # Add approaches (Pure LLM or Hybrid RAG only)
         if [[ "$enable_llm" == "true" ]]; then
-            cmd="$cmd --enable-llm"
-        fi
-        
-        if [[ "$enable_metrics" == "false" ]]; then
-            cmd="$cmd --disable-metrics"
-        fi
-        
-        if [[ -n "$file_limit" ]]; then
-            cmd="$cmd --limit $file_limit"
-        fi
-        
-        # Execute processing
-        info "Executing: $cmd"
-        eval "$cmd"
-        local exit_code=$?
-        
-        if [[ $exit_code -eq 0 ]]; then
-            success "LOT-$lot_num processing completed successfully"
-            info "Results saved to: $output_dir"
+            payload="$payload\"approaches\": [\"hybrid_rag\", \"pure_llm\"]"
         else
-            error "LOT-$lot_num processing failed with exit code $exit_code"
+            payload="$payload\"approaches\": [\"hybrid_rag\"]"
         fi
         
-        return $exit_code
+        # Add confidence threshold
+        payload="$payload, \"confidence_threshold\": 0.3"
+        
+        # Add max pages
+        payload="$payload, \"max_pages\": 2"
+        
+        payload="$payload}"
+        
+        # Add enable metrics
+        payload="$payload, \"enable_metrics\": $enable_metrics"
+        
+        payload="$payload}"
+        
+        info "Calling integrated backend API..."
+        info "Payload: $payload"
+        
+        # Make API call
+        local response
+        if command -v curl >/dev/null 2>&1; then
+            response=$(curl -s -X POST \
+                -H "Content-Type: application/json" \
+                -d "$payload" \
+                "$INTEGRATED_BACKEND_URL/api/services/hybrid-rag-classification/process-folder")
+            local curl_exit_code=$?
+            
+            if [[ $curl_exit_code -eq 0 ]]; then
+                # Check if response indicates success
+                if command -v jq >/dev/null 2>&1; then
+                    local success_status=$(echo "$response" | jq -r '.success // false')
+                    if [[ "$success_status" == "true" ]]; then
+                        success "LOT-$lot_num processing completed successfully"
+                        
+                        # Extract stats from response
+                        local total_files=$(echo "$response" | jq -r '.data.total_files // 0')
+                        local processed_files=$(echo "$response" | jq -r '.data.processing_stats.processed_files // 0')
+                        local failed_files=$(echo "$response" | jq -r '.data.processing_stats.failed_files // 0')
+                        
+                        info "📄 Total files: $total_files"
+                        info "✅ Processed: $processed_files"
+                        info "❌ Failed: $failed_files"
+                        info "Results saved to: $output_dir"
+                        
+                        return 0
+                    else
+                        local error_msg=$(echo "$response" | jq -r '.error // "Unknown error"')
+                        error "API returned error: $error_msg"
+                        return 1
+                    fi
+                else
+                    # Fallback without jq
+                    if echo "$response" | grep -q '"success".*true'; then
+                        success "LOT-$lot_num processing completed successfully"
+                        info "Results saved to: $output_dir"
+                        return 0
+                    else
+                        error "API call failed or returned error"
+                        info "Response: $response"
+                        return 1
+                    fi
+                fi
+            else
+                error "Failed to call integrated backend API (curl exit code: $curl_exit_code)"
+                return 1
+            fi
+        else
+            error "curl command not available - cannot call integrated backend API"
+            return 1
+        fi
     )
 }
 

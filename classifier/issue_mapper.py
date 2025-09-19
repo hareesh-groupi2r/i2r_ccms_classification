@@ -118,16 +118,30 @@ class IssueCategoryMapper:
         Returns:
             List of tuples (category, confidence_score)
         """
-        if issue_type not in self.issue_to_categories:
-            logger.warning(f"Issue type '{issue_type}' not found in mapping")
-            return []
-        
-        categories = self.issue_to_categories[issue_type]
+        # Try direct lookup first
+        if issue_type in self.issue_to_categories:
+            categories = self.issue_to_categories[issue_type]
+            actual_issue_type = issue_type
+        else:
+            # Try normalization if direct lookup fails
+            normalized_result = self.issue_normalizer.normalize_issue_type(issue_type)
+            if normalized_result and len(normalized_result) >= 2:
+                normalized_issue_type = normalized_result[0]
+                if normalized_issue_type in self.issue_to_categories:
+                    categories = self.issue_to_categories[normalized_issue_type]
+                    actual_issue_type = normalized_issue_type
+                    logger.info(f"Issue normalization helped: '{issue_type}' -> '{normalized_issue_type}'")
+                else:
+                    logger.warning(f"Issue type '{issue_type}' not found in mapping (normalized: '{normalized_issue_type}')")
+                    return []
+            else:
+                logger.warning(f"Issue type '{issue_type}' not found in mapping")
+                return []
         
         # Calculate confidence based on frequency in training data
         results = []
         for category in categories:
-            confidence = self._calculate_confidence(issue_type, category)
+            confidence = self._calculate_confidence(actual_issue_type, category)
             if confidence >= confidence_threshold:
                 results.append((category, confidence))
         

@@ -1,0 +1,269 @@
+"""
+Centralized Configuration Service
+Manages configuration for all document processing services
+"""
+
+import os
+import json
+import yaml
+from pathlib import Path
+from typing import Dict, Any, Optional
+from dataclasses import dataclass, field
+import pandas as pd
+
+from .interfaces import IConfigurationService, ProcessingResult, ProcessingStatus
+
+
+@dataclass
+class ServiceConfig:
+    """Configuration container for individual services"""
+    service_name: str
+    enabled: bool = True
+    config: Dict[str, Any] = field(default_factory=dict)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+class ConfigurationService(IConfigurationService):
+    """Centralized configuration management"""
+    
+    def __init__(self, config_dir: Optional[str] = None):
+        self.config_dir = Path(config_dir) if config_dir else Path(__file__).parent.parent
+        self.configs: Dict[str, ServiceConfig] = {}
+        self._load_configurations()
+    
+    def _load_configurations(self):
+        """Load all service configurations"""
+        try:
+            # Load default configurations
+            self._load_default_configs()
+            
+            # Load environment-specific overrides
+            self._load_environment_configs()
+            
+            # Load reference data
+            self._load_reference_data()
+            
+        except Exception as e:
+            print(f"Warning: Configuration loading failed: {e}")
+    
+    def _load_default_configs(self):
+        """Load default service configurations"""
+        
+        # Document AI Configuration
+        self.configs["docai"] = ServiceConfig(
+            service_name="docai",
+            config={
+                "project_id": os.environ.get("DOCAI_PROJECT_ID", "dynamic-aurora-467007-q5"),
+                "location": os.environ.get("DOCAI_LOCATION", "us"),
+                "processor_id": os.environ.get("DOCAI_PROCESSOR_ID", "c649821a479ca9b"),
+                "timeout": 300,
+                "retry_count": 3
+            }
+        )
+        
+        # Google Generative AI Configuration
+        self.configs["llm"] = ServiceConfig(
+            service_name="llm",
+            config={
+                "api_key": os.environ.get("GOOGLE_API_KEY"),
+                "model_name": "gemini-1.5-flash",
+                "temperature": 0.1,
+                "max_tokens": 4000,
+                "timeout": 60,
+                "retry_count": 2
+            }
+        )
+        
+        # Document Type Classification Configuration
+        self.configs["document_type"] = ServiceConfig(
+            service_name="document_type",
+            config={
+                "contract_keywords": ["agreement", "contract", "schedule j", "article 19", "schedule h"],
+                "correspondence_keywords": ["letter", "ref", "subject", "dear sir", "yours faithfully"],
+                "contract_search_terms": {
+                    "(?:This\\s+)?Agreement\\s+is\\s+entered\\s+into": 0,
+                    "(?:\\n|^)\\s*SCHEDULE\\s*[- ]*\\s*J\\s*(?:\\n|$)": "MULTILINE",
+                    "(?:\\n|^)\\s*ARTICLE\\s+19\\s*(?:\\n|$)": "MULTILINE",
+                    "(?:\\n|^)\\s*SCHEDULE\\s*[- ]*\\s*H\\s*(?:\\n|$)": "MULTILINE"
+                },
+                "pages_to_check": 5,
+                "confidence_threshold": 0.6
+            }
+        )
+        
+        # OCR Configuration
+        self.configs["ocr"] = ServiceConfig(
+            service_name="ocr",
+            config={
+                "fallback_to_tesseract": True,
+                "tesseract_language": "eng",
+                "min_text_length": 50,
+                "concurrent_pages": 4,
+                "image_dpi": 300
+            }
+        )
+        
+        # Category Mapping Configuration
+        self.configs["category_mapping"] = ServiceConfig(
+            service_name="category_mapping",
+            config={
+                "mapping_file": "Issue_to_category_mapping.csv",
+                "default_category": "Others",
+                "confidence_threshold": 0.7,
+                "fuzzy_matching": True
+            }
+        )
+        
+        # Processing Pipeline Configuration
+        self.configs["pipeline"] = ServiceConfig(
+            service_name="pipeline",
+            config={
+                "temp_dir_prefix": "ccms_processing_",
+                "cleanup_temp_files": True,
+                "max_file_size_mb": 200,
+                "supported_formats": ["pdf", "png", "jpg", "jpeg", "tiff"],
+                "processing_timeout": 600
+            }
+        )
+    
+    def _load_environment_configs(self):
+        """Load environment-specific configuration overrides"""
+        
+        # Check for environment-specific config files
+        env_config_file = self.config_dir / "config" / "environment.yaml"
+        if env_config_file.exists():
+            try:
+                with open(env_config_file, 'r') as f:
+                    env_configs = yaml.safe_load(f)
+                
+                for service_name, config_override in env_configs.items():
+                    if service_name in self.configs:
+                        self.configs[service_name].config.update(config_override)
+                        
+            except Exception as e:
+                print(f"Warning: Failed to load environment config: {e}")
+    
+    def _load_reference_data(self):
+        """Load reference data for services"""
+        reference_data = {}
+        
+        try:
+            # Load issue mapping data
+            mapping_file = self.config_dir / "Issue_to_category_mapping.csv"
+            if mapping_file.exists():
+                df = pd.read_csv(mapping_file)
+                issue_mappings = dict(zip(df['Issue_Type'], df['Mapped_Category']))
+                reference_data["issue_mappings"] = issue_mappings
+                reference_data["available_categories"] = df['Mapped_Category'].unique().tolist()
+                reference_data["available_issue_types"] = df['Issue_Type'].unique().tolist()
+            
+            # Load contract field definitions
+            contract_fields_file = self.config_dir / "reference_data" / "contract_fields.json"
+            if contract_fields_file.exists():
+                with open(contract_fields_file, 'r') as f:
+                    reference_data["contract_fields"] = json.load(f)
+            else:
+                # Default contract fields
+                reference_data["contract_fields"] = {
+                    "Project Name": "Official name of the project",
+                    "Contract Value": "Total contract amount with currency",
+                    "Contractor Name": "Name of the contracting organization",
+                    "Start Date": "Project start date",
+                    "End Date": "Project completion date",
+                    "Location": "Project location"
+                }
+            
+            # Store reference data in configuration
+            self.configs["reference_data"] = ServiceConfig(
+                service_name="reference_data",
+                config=reference_data
+            )
+            
+        except Exception as e:
+            print(f"Warning: Failed to load reference data: {e}")
+    
+    def get_service_config(self, service_name: str) -> Dict[str, Any]:
+        """Get configuration for specific service"""
+        if service_name in self.configs:
+            return self.configs[service_name].config
+        return {}
+    
+    def update_service_config(self, service_name: str, config: Dict[str, Any]) -> bool:
+        """Update configuration for specific service"""
+        try:
+            if service_name in self.configs:
+                self.configs[service_name].config.update(config)
+            else:
+                self.configs[service_name] = ServiceConfig(
+                    service_name=service_name,
+                    config=config
+                )
+            return True
+        except Exception as e:
+            print(f"Error updating config for {service_name}: {e}")
+            return False
+    
+    def validate_configuration(self) -> ProcessingResult:
+        """Validate all service configurations"""
+        errors = []
+        warnings = []
+        
+        # Validate LLM configuration
+        llm_config = self.get_service_config("llm")
+        if not llm_config.get("api_key"):
+            errors.append("GOOGLE_API_KEY not configured for LLM service")
+        
+        # Validate Document AI configuration
+        docai_config = self.get_service_config("docai")
+        required_docai_fields = ["project_id", "location", "processor_id"]
+        for field in required_docai_fields:
+            if not docai_config.get(field):
+                warnings.append(f"Document AI {field} not configured")
+        
+        # Validate reference data
+        ref_data = self.get_service_config("reference_data")
+        if not ref_data.get("issue_mappings"):
+            warnings.append("Issue mapping data not loaded")
+        
+        # Validate file paths
+        if not self.config_dir.exists():
+            errors.append(f"Configuration directory not found: {self.config_dir}")
+        
+        status = ProcessingStatus.ERROR if errors else (
+            ProcessingStatus.PARTIAL if warnings else ProcessingStatus.SUCCESS
+        )
+        
+        return ProcessingResult(
+            status=status,
+            data={
+                "errors": errors,
+                "warnings": warnings,
+                "services_configured": list(self.configs.keys())
+            }
+        )
+    
+    def get_all_configs(self) -> Dict[str, ServiceConfig]:
+        """Get all service configurations"""
+        return self.configs.copy()
+    
+    def is_service_enabled(self, service_name: str) -> bool:
+        """Check if a service is enabled"""
+        if service_name in self.configs:
+            return self.configs[service_name].enabled
+        return False
+    
+    def enable_service(self, service_name: str, enabled: bool = True):
+        """Enable or disable a service"""
+        if service_name in self.configs:
+            self.configs[service_name].enabled = enabled
+
+
+# Global configuration instance
+_config_service = None
+
+def get_config_service() -> ConfigurationService:
+    """Get the global configuration service instance"""
+    global _config_service
+    if _config_service is None:
+        _config_service = ConfigurationService()
+    return _config_service

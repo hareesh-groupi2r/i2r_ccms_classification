@@ -85,7 +85,7 @@ def check_data_files():
     if not Path('./.env').exists():
         logger.warning("⚠️  .env file not found. Create one with your API keys:")
         logger.warning("  OPENAI_API_KEY=your-key-here")
-        logger.warning("  ANTHROPIC_API_KEY=your-key-here")
+        logger.warning("  CLAUDE_API_KEY=your-key-here")
     
     logger.info("✅ Essential data files found")
     return True
@@ -114,11 +114,11 @@ def check_api_keys():
     logger.info("🔑 Checking API configuration...")
     
     openai_key = os.getenv('OPENAI_API_KEY')
-    anthropic_key = os.getenv('ANTHROPIC_API_KEY')
+    anthropic_key = os.getenv('CLAUDE_API_KEY')
     
     if not openai_key and not anthropic_key:
         logger.warning("⚠️  No LLM API keys found. Only RAG-based classification will work.")
-        logger.warning("   Set OPENAI_API_KEY or ANTHROPIC_API_KEY in .env file for full functionality")
+        logger.warning("   Set OPENAI_API_KEY or CLAUDE_API_KEY in .env file for full functionality")
         return False
     
     if openai_key and openai_key.startswith('sk-'):

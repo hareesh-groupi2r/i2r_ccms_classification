@@ -1,0 +1,25 @@
+batch_processing:
+  approaches:
+    hybrid_rag:
+      enabled: true
+      priority: 1
+    pure_llm:
+      enabled: false
+      priority: 2
+  enabled: true
+  evaluation:
+    auto_detect_ground_truth: false
+    enabled: true
+    ground_truth_patterns:
+    - EDMS*.xlsx
+    - LOT-*.xlsx
+    - ground_truth*.xlsx
+    - '*_labels.xlsx'
+  output:
+    results_folder: results
+    save_format: xlsx
+  processing:
+    max_files: 1
+    max_pages_per_pdf: 2
+    rate_limit_delay: 1
+    skip_on_error: true
