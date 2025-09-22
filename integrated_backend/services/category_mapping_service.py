@@ -334,7 +334,7 @@ class CategoryMappingService(ICategoryMappingService):
                 status=ProcessingStatus.ERROR,
                 error_message=f"Error getting available issue types: {str(e)}"
             )
-
+    
     def get_issue_types_for_category(self, category: str, **kwargs) -> ProcessingResult:
         """
         Get issue types that map to a specific category
