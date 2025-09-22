@@ -173,4 +173,6 @@ prompt_to_make_classification-as-another-service.rtf
 classinfication_cheatsheet.md
 
 # Processing scripts (project-specific)
-process_batch_lots.py
+process_batch_lots.pyintegrated_backend.backup/
+lot21_complete_fixed_false_positives/
+temp_limited_lot_LOT-21/
