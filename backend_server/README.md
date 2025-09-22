@@ -150,7 +150,7 @@ curl http://localhost:5001/health
 ## 📁 Project Structure
 
 ```
-backend/
+backend_server/
 ├── .venv/                 # Virtual environment (auto-generated)
 ├── api/                   # Flask web application
 │   ├── app.py            # Main Flask app
@@ -181,7 +181,7 @@ backend/
 ## 🔧 Integration Notes
 
 - This backend service is self-contained and can be integrated into any application
-- All imports are relative to the backend directory
+- All imports are relative to the backend_server directory
 - Configuration is centralized in `config.yaml`
 - API endpoints are documented in `api/README_API.md`
 

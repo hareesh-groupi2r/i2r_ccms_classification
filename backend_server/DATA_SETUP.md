@@ -2,11 +2,11 @@
 
 ## 📁 Data Directory Structure
 
-The data directory is located at the **project root level** (outside of backend/):
+The data directory is located at the **project root level** (outside of backend_server/):
 
 ```
 ccms_classification/
-├── backend/              # Backend service code
+├── backend_server/       # Backend service code
 ├── classifier/           # 🔧 SHARED CLASSIFICATION MODULES
 │   ├── hybrid_rag.py    # Core classification algorithms
 │   ├── embeddings.py    # Vector operations
@@ -33,7 +33,7 @@ ccms_classification/
 ### Option A: Copy Backend + Classifier Only (Minimal)
 ```bash
 # Copy backend and shared classifier modules
-cp -r backend/ your_project/ccms_backend/
+cp -r backend_server/ your_project/ccms_backend/
 cp -r classifier/ your_project/ccms_classifier/
 
 # Update import paths in backend to point to classifier/
@@ -50,7 +50,7 @@ em.build_index(your_training_data)
 ### Option B: Copy Complete Structure (Full Setup)
 ```bash
 # Copy backend, classifier, and data for immediate functionality
-cp -r backend/ your_project/ccms_backend/
+cp -r backend_server/ your_project/ccms_backend/
 cp -r classifier/ your_project/ccms_classifier/ 
 cp -r data/ your_project/ccms_data/
 
@@ -62,7 +62,7 @@ cd your_project/ccms_backend/
 ### Option C: External Vector Database
 ```bash
 # Use external vector database (Pinecone, Qdrant, etc.)
-cp -r backend/ your_project/ccms_backend/
+cp -r backend_server/ your_project/ccms_backend/
 
 # Configure external DB in config.yaml:
 # vector_db: "pinecone"  # instead of "faiss"
@@ -96,7 +96,7 @@ cp -r backend/ your_project/ccms_backend/
 
 ### For Existing Users (With Data Directory)
 
-The backend will automatically use existing embeddings in `../data/embeddings/`
+The backend_server will automatically use existing embeddings in `../data/embeddings/`
 
 ## ⚙️ Configuration
 

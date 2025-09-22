@@ -19,13 +19,13 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-# Configuration - Paths relative to script location (backend/)
+# Configuration - Paths relative to script location (backend_server/)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BACKEND_DIR="$SCRIPT_DIR"              # We are in the backend directory
+BACKEND_DIR="$SCRIPT_DIR"              # We are in the backend_server directory
 VENV_DIR="$SCRIPT_DIR/../venv"         # Virtual env at project root level
-ENV_FILE="$SCRIPT_DIR/.env"            # Environment file in backend/
-PID_FILE="$BACKEND_DIR/server.pid"     # PID file in backend/
-LOG_FILE="$BACKEND_DIR/server.log"     # Log file in backend/
+ENV_FILE="$SCRIPT_DIR/.env"            # Environment file in backend_server/
+PID_FILE="$BACKEND_DIR/server.pid"     # PID file in backend_server/
+LOG_FILE="$BACKEND_DIR/server.log"     # Log file in backend_server/
 
 # Default settings
 DEFAULT_HOST="0.0.0.0"

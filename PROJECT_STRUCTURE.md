@@ -4,11 +4,11 @@
 
 ```
 ccms_classification/
-├── 🎯 backend/                    # CORE INTEGRATION FILES
+├── 🎯 backend_server/             # CORE INTEGRATION FILES
 │   ├── api/                      # REST API endpoints
 │   ├── services/                 # Business logic (imports from ../classifier/)
 │   ├── requirements.txt          # Production dependencies
-│   ├── start_integrated_backend.sh
+│   ├── start_ccms_backend.sh
 │   └── README.md                 # Integration guide
 │
 ├── 🔧 classifier/                # SHARED CLASSIFICATION MODULES
@@ -59,7 +59,7 @@ ccms_classification/
 ## 🎯 For Integration Use
 
 **Essential Directories:**
-- `backend/` - API and service layer
+- `backend_server/` - API and service layer
 - `classifier/` - Core classification algorithms
 - `data/` - Embeddings and training data (optional, can regenerate)
 
@@ -97,7 +97,7 @@ python tests_standalone/test_*.py   # Run specific tests
 
 ## 📝 Maintenance Notes
 
-- **Keep** `backend/` lean and focused on integration
+- **Keep** `backend_server/` lean and focused on integration
 - **Use** `tests_standalone/` for all development activities
 - **Document** new features in `docs/`
 - **Archive** completed utilities from `temp_tests/`
