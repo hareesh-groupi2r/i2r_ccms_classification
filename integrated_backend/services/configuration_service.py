@@ -9,7 +9,7 @@ import yaml
 from pathlib import Path
 from typing import Dict, Any, Optional
 from dataclasses import dataclass, field
-import pandas as pd
+from openpyxl import load_workbook
 
 from .interfaces import IConfigurationService, ProcessingResult, ProcessingStatus
 
@@ -304,11 +304,11 @@ class ConfigurationService(IConfigurationService):
             }
         )
         
-        # Category Mapping Configuration
+        # Category Mapping Configuration - XLSX only
         self.configs["category_mapping"] = ServiceConfig(
             service_name="category_mapping",
             config={
-                "mapping_file": "Issue_to_category_mapping.csv",
+                "mapping_file": "issues_to_category_mapping_normalized.xlsx",
                 "default_category": "Others",
                 "confidence_threshold": 0.7,
                 "fuzzy_matching": True
@@ -360,14 +360,55 @@ class ConfigurationService(IConfigurationService):
         reference_data = {}
         
         try:
-            # Load issue mapping data
-            mapping_file = self.config_dir / "Issue_to_category_mapping.csv"
-            if mapping_file.exists():
-                df = pd.read_csv(mapping_file)
-                issue_mappings = dict(zip(df['Issue_Type'], df['Mapped_Category']))
-                reference_data["issue_mappings"] = issue_mappings
-                reference_data["available_categories"] = df['Mapped_Category'].unique().tolist()
-                reference_data["available_issue_types"] = df['Issue_Type'].unique().tolist()
+            # Load issue mapping data from XLSX file only
+            xlsx_mapping_file = self.config_dir / "issues_to_category_mapping_normalized.xlsx"
+            
+            if xlsx_mapping_file.exists():
+                # Load XLSX using openpyxl
+                workbook = load_workbook(xlsx_mapping_file, read_only=True)
+                sheet = workbook.active
+                
+                # Get headers from first row
+                headers = [cell.value for cell in sheet[1]]
+                
+                # Handle different column naming conventions
+                issue_type_col = None
+                category_col = None
+                
+                for i, header in enumerate(headers):
+                    if header and header.lower().replace('_', '').replace(' ', '') in ['issuetype', 'issuetypes']:
+                        issue_type_col = i
+                    elif header and header.lower().replace('_', '').replace(' ', '') in ['mappedcategory', 'category']:
+                        category_col = i
+                
+                if issue_type_col is not None and category_col is not None:
+                    # Load mappings (skip header row)
+                    issue_mappings = {}
+                    categories = set()
+                    issue_types = set()
+                    
+                    for row in sheet.iter_rows(min_row=2, values_only=True):
+                        if (len(row) > max(issue_type_col, category_col) and 
+                            row[issue_type_col] and row[category_col]):
+                            issue_type = str(row[issue_type_col]).strip()
+                            category_raw = str(row[category_col]).strip()
+                            
+                            # Keep original mapping for exact matching
+                            issue_mappings[issue_type] = category_raw
+                            issue_types.add(issue_type)
+                            
+                            # Split comma-separated categories and add to unique set
+                            if ',' in category_raw:
+                                split_categories = [cat.strip() for cat in category_raw.split(',')]
+                                categories.update(split_categories)
+                            else:
+                                categories.add(category_raw)
+                    
+                    reference_data["issue_mappings"] = issue_mappings
+                    reference_data["available_categories"] = sorted(list(categories))
+                    reference_data["available_issue_types"] = sorted(list(issue_types))
+                    
+                workbook.close()
             
             # Load contract field definitions
             contract_fields_file = self.config_dir / "reference_data" / "contract_fields.json"
