@@ -142,6 +142,15 @@ def create_app(config_name='default'):
                     "issue_types": "GET /hybrid-rag-classification/issue-types - Get available issue types",
                     "status": "GET /hybrid-rag-classification/status - Get classification service status"
                 },
+                "issue_types": {
+                    "list": "GET /issue-types - Get all issue types",
+                    "get": "GET /issue-types/{id} - Get specific issue type"
+                },
+                "issue_categories": {
+                    "list": "GET /issue-categories - Get all issue categories",
+                    "get": "GET /issue-categories/{id} - Get specific issue category",
+                    "by_issue_type": "GET /issue-categories/by-issue-type/{issue_type_id} - Get categories for issue type"
+                },
                 "orchestrator": {
                     "process_document": "POST /orchestrator/process-document - Full document processing",
                     "process_partial": "POST /orchestrator/process-partial - Partial processing",

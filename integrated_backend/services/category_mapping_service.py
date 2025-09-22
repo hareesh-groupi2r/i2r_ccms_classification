@@ -283,6 +283,58 @@ class CategoryMappingService(ICategoryMappingService):
                 error_message=f"Error getting available categories: {str(e)}"
             )
     
+    def get_available_issue_types(self, **kwargs) -> ProcessingResult:
+        """
+        Get list of all available issue types
+        
+        Args:
+            **kwargs: Options
+                - include_counts: Include count of mappings per issue type
+                - sort_by: Sort by 'name' (default) or 'count'
+        
+        Returns:
+            ProcessingResult with list of issue types
+        """
+        try:
+            include_counts = kwargs.get("include_counts", False)
+            sort_by = kwargs.get("sort_by", "name")
+            
+            if include_counts:
+                # Count how many categories each issue type maps to
+                issue_counts = {}
+                for issue_type in self.available_issue_types:
+                    issue_counts[issue_type] = 1  # Each issue maps to exactly one category
+                
+                # Sort by count or name
+                if sort_by == "count":
+                    sorted_items = sorted(issue_counts.items(), key=lambda x: x[1], reverse=True)
+                else:
+                    sorted_items = sorted(issue_counts.items(), key=lambda x: x[0])
+                
+                issue_types_with_counts = [
+                    {"name": issue_type, "mapping_count": count}
+                    for issue_type, count in sorted_items
+                ]
+                
+                return ProcessingResult(
+                    status=ProcessingStatus.SUCCESS,
+                    data=issue_types_with_counts,
+                    metadata={"total_issue_types": len(issue_types_with_counts)}
+                )
+            else:
+                issue_types_list = sorted(list(self.available_issue_types))
+                return ProcessingResult(
+                    status=ProcessingStatus.SUCCESS,
+                    data=issue_types_list,
+                    metadata={"total_issue_types": len(issue_types_list)}
+                )
+                
+        except Exception as e:
+            return ProcessingResult(
+                status=ProcessingStatus.ERROR,
+                error_message=f"Error getting available issue types: {str(e)}"
+            )
+    
     def get_issue_types_for_category(self, category: str, **kwargs) -> ProcessingResult:
         """
         Get issue types that map to a specific category

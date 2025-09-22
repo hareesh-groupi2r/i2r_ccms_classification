@@ -627,6 +627,256 @@ def remove_issue_mapping():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+# Issue Types and Categories REST API Endpoints
+@service_api.route('/issue-types', methods=['GET'])
+def get_issue_types():
+    """Get list of all available issue types"""
+    try:
+        result = category_mapping_service.get_available_issue_types()
+        
+        if result.status == ProcessingStatus.SUCCESS:
+            # Format as REST API response with proper structure
+            issue_types_data = [
+                {
+                    "id": f"issue_type_{i+1}",
+                    "name": issue_type
+                }
+                for i, issue_type in enumerate(result.data)
+            ]
+            
+            return jsonify({
+                "success": True,
+                "data": issue_types_data,
+                "count": len(issue_types_data)
+            })
+        else:
+            return jsonify({
+                "success": False,
+                "error": result.error_message or "Failed to get issue types"
+            }), 500
+    
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
+@service_api.route('/issue-types/<string:issue_type_id>', methods=['GET'])
+def get_issue_type_by_id(issue_type_id: str):
+    """Get specific issue type by ID"""
+    try:
+        result = category_mapping_service.get_available_issue_types()
+        
+        if result.status != ProcessingStatus.SUCCESS:
+            return jsonify({
+                "success": False,
+                "error": result.error_message or "Failed to get issue types"
+            }), 500
+            
+        issue_types = result.data
+        
+        # Extract index from ID (format: issue_type_1, issue_type_2, etc.)
+        try:
+            index = int(issue_type_id.replace('issue_type_', '')) - 1
+            if 0 <= index < len(issue_types):
+                issue_type = issue_types[index]
+                return jsonify({
+                    "success": True,
+                    "data": {
+                        "id": issue_type_id,
+                        "name": issue_type
+                    }
+                })
+            else:
+                return jsonify({
+                    "success": False,
+                    "error": "Issue type not found"
+                }), 404
+        except ValueError:
+            return jsonify({
+                "success": False,
+                "error": "Invalid issue type ID format"
+            }), 400
+    
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
+@service_api.route('/issue-categories', methods=['GET'])
+def get_issue_categories():
+    """Get list of all available issue categories"""
+    try:
+        categories_result = category_mapping_service.get_available_categories()
+        issue_types_result = category_mapping_service.get_available_issue_types()
+        
+        if categories_result.status != ProcessingStatus.SUCCESS:
+            return jsonify({
+                "success": False,
+                "error": categories_result.error_message or "Failed to get categories"
+            }), 500
+            
+        if issue_types_result.status != ProcessingStatus.SUCCESS:
+            return jsonify({
+                "success": False,
+                "error": issue_types_result.error_message or "Failed to get issue types"
+            }), 500
+        
+        categories = categories_result.data
+        issue_types = issue_types_result.data
+        
+        # Build categories with their related issue types
+        categories_data = []
+        for i, category in enumerate(categories):
+            # Get issue types for this category
+            category_issues = category_mapping_service.get_issue_types_for_category(category)
+            
+            # Find issue type IDs for those that map to this category
+            issue_type_ids = []
+            if category_issues.status == ProcessingStatus.SUCCESS:
+                for j, issue_type in enumerate(issue_types):
+                    if issue_type in category_issues.data:
+                        issue_type_ids.append(f"issue_type_{j+1}")
+            
+            categories_data.append({
+                "id": f"category_{i+1}",
+                "name": category,
+                "issue_type_ids": issue_type_ids
+            })
+        
+        return jsonify({
+            "success": True,
+            "data": categories_data,
+            "count": len(categories_data)
+        })
+    
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
+@service_api.route('/issue-categories/<string:category_id>', methods=['GET'])
+def get_issue_category_by_id(category_id: str):
+    """Get specific issue category by ID"""
+    try:
+        categories = category_mapping_service.get_available_categories()
+        issue_types = category_mapping_service.get_available_issue_types()
+        
+        # Extract index from ID (format: category_1, category_2, etc.)
+        try:
+            index = int(category_id.replace('category_', '')) - 1
+            if 0 <= index < len(categories):
+                category = categories[index]
+                
+                # Get issue types for this category
+                category_issues = category_mapping_service.get_issue_types_for_category(category)
+                
+                # Find issue type IDs for those that map to this category
+                issue_type_ids = []
+                for j, issue_type in enumerate(issue_types):
+                    if issue_type in category_issues.data.get('issue_types', []):
+                        issue_type_ids.append(f"issue_type_{j+1}")
+                
+                return jsonify({
+                    "success": True,
+                    "data": {
+                        "id": category_id,
+                        "name": category,
+                        "issue_type_ids": issue_type_ids
+                    }
+                })
+            else:
+                return jsonify({
+                    "success": False,
+                    "error": "Category not found"
+                }), 404
+        except ValueError:
+            return jsonify({
+                "success": False,
+                "error": "Invalid category ID format"
+            }), 400
+    
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
+@service_api.route('/issue-categories/by-issue-type/<string:issue_type_id>', methods=['GET'])
+def get_categories_by_issue_type(issue_type_id: str):
+    """Get categories that belong to a specific issue type"""
+    try:
+        issue_types_result = category_mapping_service.get_available_issue_types()
+        categories_result = category_mapping_service.get_available_categories()
+        
+        if issue_types_result.status != ProcessingStatus.SUCCESS:
+            return jsonify({
+                "success": False,
+                "error": issue_types_result.error_message or "Failed to get issue types"
+            }), 500
+            
+        if categories_result.status != ProcessingStatus.SUCCESS:
+            return jsonify({
+                "success": False,
+                "error": categories_result.error_message or "Failed to get categories"
+            }), 500
+        
+        issue_types = issue_types_result.data
+        categories = categories_result.data
+        
+        # Extract index from issue type ID
+        try:
+            index = int(issue_type_id.replace('issue_type_', '')) - 1
+            if 0 <= index < len(issue_types):
+                issue_type = issue_types[index]
+                
+                # Get the category this issue type maps to
+                mapping_result = category_mapping_service.map_issue_to_category(issue_type)
+                if mapping_result.status == ProcessingStatus.SUCCESS:
+                    mapped_category = mapping_result.data
+                    
+                    # Find the category ID
+                    category_data = []
+                    for i, category in enumerate(categories):
+                        if category == mapped_category:
+                            category_data.append({
+                                "id": f"category_{i+1}",
+                                "name": category,
+                                "issue_type_id": issue_type_id
+                            })
+                    
+                    return jsonify({
+                        "success": True,
+                        "data": category_data,
+                        "count": len(category_data)
+                    })
+                else:
+                    return jsonify({
+                        "success": False,
+                        "error": "Could not find category mapping for issue type"
+                    }), 404
+            else:
+                return jsonify({
+                    "success": False,
+                    "error": "Issue type not found"
+                }), 404
+        except ValueError:
+            return jsonify({
+                "success": False,
+                "error": "Invalid issue type ID format"
+            }), 400
+    
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
 
 # Document Processing Orchestrator Endpoints
 @service_api.route('/orchestrator/process-document', methods=['POST'])
