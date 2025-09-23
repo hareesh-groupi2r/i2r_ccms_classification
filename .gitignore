@@ -93,6 +93,8 @@ celerybeat.pid
 
 # Environments
 .env
+.env.*
+!.env.example
 .venv
 env/
 venv/
@@ -149,6 +151,8 @@ logs/
 api_logs.txt
 full_batch.log
 *.log
+server.log
+server.pid
 
 # Results and output directories
 results/

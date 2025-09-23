@@ -205,7 +205,14 @@ load_environment() {
     export FLASK_HOST=${FLASK_HOST:-$DEFAULT_HOST}
     export FLASK_PORT=${FLASK_PORT:-$DEFAULT_PORT}
     export FLASK_DEBUG=${FLASK_DEBUG:-true}
-    export BACKEND_URL=${BACKEND_URL:-"http://localhost:$FLASK_PORT"}
+    
+    # Derive BACKEND_URL from FLASK_HOST and FLASK_PORT
+    # If FLASK_HOST is 0.0.0.0 (listen on all interfaces), use localhost for frontend connections
+    local frontend_host="$FLASK_HOST"
+    if [ "$FLASK_HOST" = "0.0.0.0" ]; then
+        frontend_host="localhost"
+    fi
+    export BACKEND_URL="http://$frontend_host:$FLASK_PORT"
     
     # Validate required API keys
     local missing_keys=()
@@ -316,6 +323,7 @@ show_usage() {
     echo "  -k, --kill-only Kill existing servers and exit"
     echo "  -s, --status    Show server status and exit"
     echo "  --start         Start server (kill existing if found)"
+    echo "  --stop          Stop server and clear port"
     echo "  --restart       Restart server (same as --start)"
     echo "  -t, --test      Run backend tests after starting server"
     echo ""
@@ -327,6 +335,7 @@ show_usage() {
     echo "Examples:"
     echo "  $0              Start server (interactive mode)"
     echo "  $0 --start      Start server (auto-kill existing)"
+    echo "  $0 --stop       Stop server and clear port"
     echo "  $0 --restart    Restart server (auto-kill existing)"
     echo "  $0 --force      Start server (kill existing without prompt)"
     echo "  $0 --status     Check server status"
@@ -473,10 +482,16 @@ show_status() {
             echo "    🤖 Classification Service:"
             echo "      Service Status: $BACKEND_URL/api/services/hybrid-rag-classification/status"
             echo "      Available Categories: $BACKEND_URL/api/services/hybrid-rag-classification/categories"
-            echo "      Available Issues: $BACKEND_URL/api/services/hybrid-rag-classification/issues"
+            echo "      Available Issue Types: $BACKEND_URL/api/services/hybrid-rag-classification/issue-types"
             echo "      Classify Text: $BACKEND_URL/api/services/hybrid-rag-classification/classify-text"
             echo "      Classify Batch: $BACKEND_URL/api/services/hybrid-rag-classification/classify-batch"
             echo "      Process Folder: $BACKEND_URL/api/services/hybrid-rag-classification/process-folder"
+            echo "      Process Single PDF: $BACKEND_URL/api/services/hybrid-rag-classification/process-single-pdf"
+            echo ""
+            echo "    📋 Issue Management Services:"
+            echo "      All Issue Types: $BACKEND_URL/api/services/issue-types"
+            echo "      All Issue Categories: $BACKEND_URL/api/services/issue-categories"
+            echo "      Categories by Issue Type: $BACKEND_URL/api/services/issue-categories/by-issue-type/{issue_type_id}"
             echo ""
             echo "    📄 Document Services:"
             echo "      Document Type: $BACKEND_URL/api/services/document-type/classify"
@@ -493,6 +508,7 @@ show_status() {
             echo "      Get Mappings: $BACKEND_URL/api/services/category-mapping/mappings"
             echo "      Map Issue: $BACKEND_URL/api/services/category-mapping/map-issue"
             echo "      Map Categories: $BACKEND_URL/api/services/category-mapping/map-categories"
+            echo "      Categories by Issue: $BACKEND_URL/api/services/category-mapping/categories/{category}/issues"
             
             # Quick endpoint availability test
             echo ""
@@ -503,6 +519,9 @@ show_status() {
                     "/api/services/health:Health"
                     "/api/services/hybrid-rag-classification/status:Classification Status"
                     "/api/services/hybrid-rag-classification/categories:Categories"
+                    "/api/services/hybrid-rag-classification/issue-types:Issue Types"
+                    "/api/services/issue-types:All Issue Types"
+                    "/api/services/issue-categories:All Issue Categories"
                     "/api/services/ocr/methods:OCR Methods"
                 )
                 
@@ -540,7 +559,13 @@ show_status() {
     echo "  Host: ${FLASK_HOST:-$DEFAULT_HOST}"
     echo "  Port: ${FLASK_PORT:-$DEFAULT_PORT}"
     echo "  Debug: ${FLASK_DEBUG:-true}"
-    echo "  Backend URL: $BACKEND_URL"
+    echo ""
+    echo "🔗 Frontend Integration:"
+    echo "  ✅ Backend URL: $BACKEND_URL"
+    echo "     Use this URL in your frontend application to connect to the backend"
+    echo "     Example: fetch('$BACKEND_URL/api/services/health')"
+    echo ""
+    echo "📝 Logs:"
     echo "  Log File: $LOG_FILE"
     if [ -f "$LOG_FILE" ]; then
         local log_size=$(wc -l < "$LOG_FILE" 2>/dev/null || echo "0")
@@ -568,6 +593,7 @@ main() {
     local force_kill=false
     local kill_only=false
     local status_only=false
+    local stop_only=false
     local run_tests=false
     local auto_start=false
     
@@ -587,6 +613,10 @@ main() {
                 ;;
             -s|--status)
                 status_only=true
+                shift
+                ;;
+            --stop)
+                stop_only=true
                 shift
                 ;;
             --start|--restart)
@@ -612,6 +642,19 @@ main() {
     # Show status if requested
     if [ "$status_only" = true ]; then
         show_status
+        exit 0
+    fi
+    
+    # Stop server if requested
+    if [ "$stop_only" = true ]; then
+        print_status "Stopping CCMS backend server..."
+        cleanup_everything "$FLASK_PORT"
+        if [ $? -eq 0 ]; then
+            print_success "Server stopped and port cleared successfully!"
+        else
+            print_error "Failed to stop server or clear port"
+            exit 1
+        fi
         exit 0
     fi
     
@@ -657,6 +700,15 @@ main() {
         print_error "Failed to start server successfully!"
         echo "============================================================================"
         exit 1
+    fi
+    
+    # Show status after successful startup when using --start
+    if [ "$auto_start" = true ]; then
+        echo ""
+        echo "============================================================================"
+        print_success "Server started successfully! Here's the current status:"
+        echo "============================================================================"
+        show_status
     fi
     
     # Run tests if requested
