@@ -257,6 +257,103 @@ class HybridRAGClassificationService:
                 }
             )
     
+    def _format_issue_centric_response(self, raw_result, filtered_categories, filtered_issues, 
+                                      approach, processing_time, overall_confidence):
+        """
+        Convert category-centric classification result to issue-centric format
+        
+        Uses the actual validated issues and categories from the hybrid RAG system
+        to create an issue → categories mapping
+        """
+        issues = []
+        issue_to_data = {}
+        
+        # Method 1: Use source_issues from filtered_categories (if available)
+        for cat_info in filtered_categories:
+            category = cat_info.get('category', '')
+            justification = cat_info.get('justification', '')
+            
+            # Process source issues for this category
+            for source_issue in cat_info.get('source_issues', []):
+                issue_type = source_issue.get('issue_type', '')
+                issue_confidence = source_issue.get('confidence', 0.0)
+                issue_source = source_issue.get('source', 'unknown')
+                evidence = source_issue.get('evidence', '')
+                
+                if issue_type not in issue_to_data:
+                    issue_to_data[issue_type] = {
+                        'categories': [],
+                        'confidence': issue_confidence,
+                        'justification': evidence or justification,
+                        'source': issue_source
+                    }
+                
+                # Add category to this issue (avoid duplicates)
+                if category not in issue_to_data[issue_type]['categories']:
+                    issue_to_data[issue_type]['categories'].append(category)
+                
+                # Use the highest confidence and most detailed justification
+                if issue_confidence > issue_to_data[issue_type]['confidence']:
+                    issue_to_data[issue_type]['confidence'] = issue_confidence
+                    if evidence and len(evidence) > len(issue_to_data[issue_type]['justification']):
+                        issue_to_data[issue_type]['justification'] = evidence
+        
+        # Method 2: Use issue mapper to get categories for each identified issue (backup method)
+        if not issue_to_data and self.issue_mapper:
+            for issue_info in filtered_issues:
+                issue_type = issue_info.get('issue_type', '')
+                issue_confidence = issue_info.get('confidence', 0.0)
+                issue_source = issue_info.get('source', 'unknown')
+                
+                # Get categories for this issue from the mapper
+                try:
+                    categories = self.issue_mapper.get_categories_for_issue(issue_type)
+                except:
+                    categories = []  # Fallback if mapper method doesn't exist
+                
+                issue_to_data[issue_type] = {
+                    'categories': categories,
+                    'confidence': issue_confidence,
+                    'justification': f"Identified {issue_type} issue with {issue_confidence:.0%} confidence",
+                    'source': issue_source
+                }
+        
+        # Method 3: Fallback - just use identified issues even without categories
+        if not issue_to_data:
+            for issue_info in filtered_issues:
+                issue_type = issue_info.get('issue_type', '')
+                issue_to_data[issue_type] = {
+                    'categories': [],
+                    'confidence': issue_info.get('confidence', 0.0),
+                    'justification': '',
+                    'source': issue_info.get('source', 'unknown')
+                }
+        
+        # Convert to list format
+        for issue_type, data in issue_to_data.items():
+            issues.append({
+                'issue_type': issue_type,
+                'categories': data['categories'],
+                'confidence': data['confidence'],
+                'justification': data['justification'],
+                'source': data['source']
+            })
+        
+        # Sort by confidence descending
+        issues.sort(key=lambda x: x['confidence'], reverse=True)
+        
+        return {
+            'approach_used': approach,
+            'processing_time': processing_time,
+            'confidence_score': overall_confidence,
+            'issues': issues,
+            'total_issues': len(issues),
+            'total_categories': len(set(cat for issue in issues for cat in issue['categories'])),
+            'data_sufficiency_warnings': raw_result.get('data_sufficiency_warnings', []),
+            'validation_report': raw_result.get('validation_report', {}),
+            'llm_provider_used': raw_result.get('llm_provider_used')
+        }
+
     def classify_text(self, subject: str, body: str = "", **kwargs) -> ProcessingResult:
         """
         Classify text content directly
@@ -281,6 +378,7 @@ class HybridRAGClassificationService:
         max_results = kwargs.get('max_results', 5)
         include_justification = kwargs.get('include_justification', True)
         include_issue_types = kwargs.get('include_issue_types', True)
+        response_format = kwargs.get('format', 'category_centric')  # 'category_centric' or 'issue_centric'
         
         try:
             # Combine subject and body for classification
@@ -347,8 +445,15 @@ class HybridRAGClassificationService:
             
             processing_time = time.time() - start_time
             
-            # Format result
-            classification_data = {
+            # Format result based on requested format
+            if response_format == 'issue_centric':
+                classification_data = self._format_issue_centric_response(
+                    raw_result, filtered_categories, filtered_issues, 
+                    approach, processing_time, overall_confidence
+                )
+            else:
+                # Default category-centric format
+                classification_data = {
                 'approach_used': approach,
                 'processing_time': processing_time,
                 'confidence_score': overall_confidence,
