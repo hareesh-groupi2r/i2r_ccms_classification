@@ -653,7 +653,11 @@ main() {
     fi
     
     # Start the server
-    start_server
+    if ! start_server; then
+        print_error "Failed to start server successfully!"
+        echo "============================================================================"
+        exit 1
+    fi
     
     # Run tests if requested
     if [ "$run_tests" = true ]; then
