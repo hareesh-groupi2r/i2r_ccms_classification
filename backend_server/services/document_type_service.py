@@ -7,6 +7,7 @@ import re
 from typing import Dict, List, Optional, Tuple
 from pathlib import Path
 from pypdf import PdfReader
+from docx import Document
 
 from .interfaces import IDocumentTypeService, ProcessingResult, ProcessingStatus, DocumentType
 from .configuration_service import get_config_service
@@ -69,10 +70,10 @@ class DocumentTypeService(IDocumentTypeService):
     
     def classify_document(self, file_path: str, **kwargs) -> ProcessingResult:
         """
-        Classify document type from PDF file
+        Classify document type from PDF or DOCX file
         
         Args:
-            file_path: Path to the PDF file
+            file_path: Path to the PDF or DOCX file
             **kwargs: Additional options
                 - pages_to_check: Number of pages to analyze
                 - use_advanced_classification: Use regex patterns for enhanced classification
@@ -88,9 +89,15 @@ class DocumentTypeService(IDocumentTypeService):
                     error_message=f"File not found: {file_path}"
                 )
             
-            # Extract text from first few pages
+            # Extract text based on file type
             pages_to_check = kwargs.get("pages_to_check", self.pages_to_check)
-            text_result = self._extract_text_from_pdf(file_path, pages_to_check)
+            
+            # Determine file type and extract text accordingly
+            file_extension = Path(file_path).suffix.lower()
+            if file_extension == '.docx':
+                text_result = self._extract_text_from_docx(file_path)
+            else:
+                text_result = self._extract_text_from_pdf(file_path, pages_to_check)
             
             if text_result.status == ProcessingStatus.ERROR:
                 return text_result
@@ -344,7 +351,51 @@ class DocumentTypeService(IDocumentTypeService):
                 status=ProcessingStatus.ERROR,
                 error_message=f"Error reading PDF: {str(e)}"
             )
-    
+    def _extract_text_from_docx(self, file_path: str) -> ProcessingResult:
+        """Extract text from DOCX document"""
+        try:
+            doc = Document(file_path)
+            text_content = ""
+            paragraphs_processed = 0
+
+            # Extract text from all paragraphs
+            for paragraph in doc.paragraphs:
+                if paragraph.text.strip():
+                    text_content += paragraph.text.strip() + "\n"
+                    paragraphs_processed += 1
+
+            # Extract text from tables if any
+            tables_processed = 0
+            for table in doc.tables:
+                for row in table.rows:
+                    for cell in row.cells:
+                        if cell.text.strip():
+                            text_content += cell.text.strip() + " "
+                tables_processed += 1
+
+            if not text_content.strip():
+                return ProcessingResult(
+                    status=ProcessingStatus.ERROR,
+                    error_message="No readable text found in DOCX"
+                )
+
+            return ProcessingResult(
+                status=ProcessingStatus.SUCCESS,
+                data=text_content.strip(),
+                confidence=0.95,
+                metadata={
+                    "paragraphs_processed": paragraphs_processed,
+                    "tables_processed": tables_processed,
+                    "text_length": len(text_content.strip())
+                }
+            )
+
+        except Exception as e:
+            return ProcessingResult(
+                status=ProcessingStatus.ERROR,
+                error_message=f"Error reading DOCX: {str(e)}"
+            )
+
     def get_classification_details(self, file_path: str) -> ProcessingResult:
         """Get detailed classification information for debugging and analysis"""
         result = self.classify_document(file_path, use_advanced_classification=True)

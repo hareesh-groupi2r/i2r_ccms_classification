@@ -74,7 +74,7 @@ class DocumentProcessingOrchestrator(IDocumentProcessingOrchestrator):
         self.cleanup_temp_files = self.config.get("cleanup_temp_files", True)
         self.max_file_size_mb = self.config.get("max_file_size_mb", 200)
         self.processing_timeout = self.config.get("processing_timeout", 600)
-        self.supported_formats = self.config.get("supported_formats", ["pdf", "png", "jpg", "jpeg", "tiff"])
+        self.supported_formats = self.config.get("supported_formats", ["pdf", "png", "jpg", "jpeg", "tiff", "docx"])
         
         # PDF optimization settings
         self.optimize_pdfs = self.config.get("optimize_pdfs", True)
@@ -154,16 +154,18 @@ class DocumentProcessingOrchestrator(IDocumentProcessingOrchestrator):
                         file_ext = Path(filename).suffix.lower()
                         is_pdf = file_ext == '.pdf'
                         is_image = file_ext in ['.jpg', '.jpeg', '.png', '.tiff', '.tif', '.bmp', '.webp']
-                        
-                        if is_pdf or is_image:
+                        is_docx = file_ext in ['.docx', '.doc']
+
+                        if is_pdf or is_image or is_docx:
+                            file_type = 'pdf' if is_pdf else ('image' if is_image else 'docx')
                             extracted_files.append({
                                 'path': extracted_path,
                                 'original_name': filename,
                                 'size': file_size,
-                                'type': 'pdf' if is_pdf else 'image',
+                                'type': file_type,
                                 'extension': file_ext
                             })
-                            self.logger.info(f"✅ Extracted: {filename} ({file_size} bytes, type: {'PDF' if is_pdf else 'Image'})")
+                            self.logger.info(f"✅ Extracted: {filename} ({file_size} bytes, type: {file_type.upper()})")
                         else:
                             self.logger.info(f"⚠️ Skipped unsupported file: {filename} (type: {file_ext})")
                             
@@ -445,8 +447,9 @@ class DocumentProcessingOrchestrator(IDocumentProcessingOrchestrator):
             if validation_result.status == ProcessingStatus.ERROR:
                 return validation_result
             
-            # Check if file is actually a ZIP file
-            if self._is_zip_file(context.file_path):
+            # Check if file is actually a ZIP file (but exclude DOCX files which are technically ZIP but should be processed as documents)
+            file_extension = Path(context.file_path).suffix.lower()
+            if self._is_zip_file(context.file_path) and file_extension != '.docx':
                 self.logger.info(f"📦 Detected ZIP file masquerading as {Path(context.file_path).suffix}: {Path(context.file_path).name}")
                 
                 # Create temp directory for extraction

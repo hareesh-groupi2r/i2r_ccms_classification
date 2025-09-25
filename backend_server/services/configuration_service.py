@@ -322,7 +322,7 @@ class ConfigurationService(IConfigurationService):
                 "temp_dir_prefix": "ccms_processing_",
                 "cleanup_temp_files": True,
                 "max_file_size_mb": 200,
-                "supported_formats": ["pdf", "png", "jpg", "jpeg", "tiff"],
+                "supported_formats": ["pdf", "png", "jpg", "jpeg", "tiff", "docx"],
                 "processing_timeout": 600,
                 # PDF Optimization settings
                 "optimize_pdfs": True,
