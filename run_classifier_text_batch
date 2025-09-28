@@ -1,0 +1,56 @@
+ curl -X POST http://localhost:5001/api/services/hybrid-rag-classification/classify-batch \
+    -H "Content-Type: application/json" \
+    -d '{
+      "texts": [
+        "This is a letter regarding contract modifications and change orders for the highway 
+  construction project. The contractor is requesting approval for additional work due to 
+  unforeseen site conditions.",
+        "Environmental clearance report for the proposed bridge construction. Impact 
+  assessment shows minimal effect on local wildlife habitats.",
+        "Invoice submission for completed earthwork activities in Phase 1. Total amount due is
+   $125,000 for excavation and grading work.",
+        "Quality control inspection report identifying defects in concrete pour. 
+  Recommendations for remedial action are included."
+      ],
+      "debug_logging": true,
+      "log_classification_details": true
+      "top_k": 10,
+      "similarity_threshold": 0.3,
+      "include_confidence_scores": true,
+    }'
+
+#Response format:
+
+#  The response will contain an array of classification results, one for each input text, with
+#  categories, issue types, and confidence scores for batch processing.
+
+
+<<COMMENT
+ What metadata provides:
+
+  Batch-level metadata (in response):
+
+  {
+    "metadata": {
+      "batch_size": 4,        // Total number of texts processed
+      "success_rate": 1.0     // Percentage successful (4/4 = 1.0)
+    }
+  }
+
+  Per-document metadata (for each text):
+
+  - text_length - Character count of processed text
+  - processing_time - Time taken for classification
+  - approach - Classification method used
+
+  Purpose:
+
+  - Performance monitoring - Track processing times and success rates
+  - Quality metrics - Identify problematic batches with low success rates
+  - Debugging - Understand processing characteristics per document
+  - Operational insights - Help tune batch sizes and parameters
+COMMENT
+: << 'EOF'
+
+
+EOF

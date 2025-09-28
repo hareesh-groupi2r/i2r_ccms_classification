@@ -1180,6 +1180,11 @@ def classify_text_content():
         body = data.get('body', '')
         options = data.get('options', {})
         
+        # Support format parameter for issue-centric vs category-centric response
+        response_format = data.get('format', 'category_centric')  # Default to category_centric for backward compatibility
+        if 'format' not in options:
+            options['format'] = response_format
+        
         result = classification_service.classify_text(subject, body, **options)
         return jsonify(format_processing_result(result))
     

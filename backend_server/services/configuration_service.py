@@ -88,7 +88,7 @@ class ConfigurationService(IConfigurationService):
             service_name="llm",
             config={
                 "api_key": os.environ.get("GOOGLE_API_KEY"),
-                "model_name": "gemini-1.5-flash",
+                "model_name": "gemini-2.0-flash",
                 "temperature": 0.1,
                 "max_tokens": 4000,
                 "timeout": 60,
@@ -109,12 +109,29 @@ class ConfigurationService(IConfigurationService):
                     "intimation", "reminder", "follow up", "follow-up"
                 ],
                 "correspondence_patterns": {
-                    r"(?i)\b(?:ref|reference)\s*[:.]\s*\w+": 0,
+                    # Header patterns (high value - strong letter indicators)
+                    r"(?i)^(?:to|from|date|subject|ref(?:erence)?)\s*[:.]\s*.+": 0,
+                    r"(?i)letter\s*(?:no|ref|id)\s*[:.]\s*\w+": 0,
+                    r"(?i)(?:your|our)\s+(?:letter|ref(?:erence)?)\s+(?:no|dated)": 0,
+                    
+                    # Salutation patterns (medium-high value)
                     r"(?i)dear\s+(?:sir|madam|mr|ms|dr)": 0,
+                    r"(?i)to\s+whom\s+it\s+may\s+concern": 0,
+                    r"(?i)respected\s+(?:sir|madam)": 0,
+                    
+                    # Closing patterns (medium value)
                     r"(?i)yours\s+(?:faithfully|sincerely|truly)": 0,
+                    r"(?i)(?:kind|warm)\s+regards": 0,
+                    r"(?i)thanking\s+you": 0,
+                    
+                    # Format patterns (medium value)
+                    r"(?i)enclos(?:ed?|ure)": 0,
+                    r"(?i)(?:cc|copy)\s*[:.]\s*.+": 0,
+                    r"(?i)attach(?:ed|ment)": 0,
+                    
+                    # Standard letter patterns
                     r"(?i)subject\s*[:.]\s*.+": 0,
-                    r"(?i)to\s*[:.]\s*.+": 0,
-                    r"(?i)from\s*[:.]\s*.+": 0,
+                    r"(?i)\b(?:ref|reference)\s*[:.]\s*\w+": 0,
                     r"(?i)date\s*[:.]\s*\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4}": 0
                 },
                 
@@ -269,25 +286,41 @@ class ConfigurationService(IConfigurationService):
                 },
                 
                 # General configuration
-                "pages_to_check": 5,
+                "pages_to_check": 1,  # Always 1 page for fast document type classification
                 "confidence_threshold": 0.6,
                 "min_keyword_matches": 2,
                 "pattern_weight": 3,
                 "keyword_weight": 1,
+                "filename_weight": 2,  # Filename matches are 2× more valuable than keywords
                 "length_based_scoring": True,
                 
+                # Filename-based detection keywords
+                "filename_keywords": {
+                    "meeting_minutes": ["minutes", "mom", "meeting", "proceedings", "agenda"],
+                    "progress_reports": ["progress", "review", "monthly", "status", "report"],
+                    "correspondence": ["letter", "correspondence", "memo", "communication"],
+                    "contract_agreements": ["agreement", "contract", "tender", "bid"],
+                    "payment_statements": ["bill", "invoice", "payment", "sps", "ipc"],
+                    "change_orders": ["change", "variation", "modification", "amendment"],
+                    "court_orders": ["order", "judgment", "court", "writ", "petition"],
+                    "policy_circulars": ["circular", "policy", "notification", "directive"],
+                    "technical_drawings": ["drawing", "plan", "layout", "blueprint", "schematic"]
+                },
+                
                 # Document type priority (higher number = higher priority in case of ties)
+                # Correspondence letters should be TRUE LAST RESORT (no processing handler for "others")
+                # All specific types should be detected first before falling back to correspondence
                 "document_type_priority": {
-                    "contract_agreements": 10,
-                    "court_orders": 9,
-                    "change_orders": 8,
-                    "payment_statements": 7,
-                    "meeting_minutes": 6,
-                    "progress_reports": 5,
-                    "policy_circulars": 4,
-                    "technical_drawings": 3,
-                    "correspondence": 2,
-                    "others": 1
+                    "court_orders": 10,           # Legal documents (highest priority)
+                    "meeting_minutes": 9,         # Clear structure/agenda patterns
+                    "progress_reports": 8,        # Project-specific reports
+                    "payment_statements": 7,      # Financial documents
+                    "policy_circulars": 6,        # Official announcements
+                    "change_orders": 5,           # Project modifications
+                    "technical_drawings": 4,      # Drawings/specifications
+                    "contract_agreements": 3,     # Large documents (200+ pages)
+                    "others": 2,                  # Unprocessable documents
+                    "correspondence": 1           # TRUE LAST RESORT (fallback for everything)
                 }
             }
         )
@@ -315,14 +348,32 @@ class ConfigurationService(IConfigurationService):
             }
         )
         
-        # Processing Pipeline Configuration
+        # Normal Document Processing Configuration (Dynamic page limits per document type)
+        self.configs["normal_processing"] = ServiceConfig(
+            service_name="normal_processing",
+            config={
+                "processing_method": "standard",
+                "text_extraction_method": "comprehensive",
+                
+                # Document-specific page limits for processing (not classification)
+                "pages_per_document_type": {
+                    "correspondence": 3,        # 3 pages for correspondence letters
+                    "meeting_minutes": 5,       # 5 pages for meeting minutes  
+                    "progress_reports": 5,      # 5 pages for progress reports
+                    "contract_agreements": -1,  # Full document with smart selection
+                    "default": 2                # 2 pages for all other types
+                }
+            }
+        )
+        
+        # Processing Pipeline Configuration (Full document processing for contracts)
         self.configs["pipeline"] = ServiceConfig(
             service_name="pipeline",
             config={
                 "temp_dir_prefix": "ccms_processing_",
                 "cleanup_temp_files": True,
                 "max_file_size_mb": 200,
-                "supported_formats": ["pdf", "png", "jpg", "jpeg", "tiff"],
+                "supported_formats": ["pdf", "png", "jpg", "jpeg", "tiff", "docx"],
                 "processing_timeout": 600,
                 # PDF Optimization settings
                 "optimize_pdfs": True,
@@ -332,7 +383,7 @@ class ConfigurationService(IConfigurationService):
                     "milestone", "completion", "terms", "conditions", "parties",
                     "contractor", "authority", "value", "amount", "duration"
                 ],
-                "max_pages_to_analyze": 20,
+                "max_pages_to_analyze": 20,  # For contract agreements - smart page selection
                 "always_include_first_pages": 3,
                 "always_include_last_pages": 2
             }
@@ -440,6 +491,33 @@ class ConfigurationService(IConfigurationService):
         if service_name in self.configs:
             return self.configs[service_name].config
         return {}
+    
+    def get_pages_to_process(self, document_type: str) -> int:
+        """Get the number of pages to process for document processing (not classification)"""
+        from .interfaces import DocumentType
+        
+        # Convert string to DocumentType enum if needed
+        if isinstance(document_type, str):
+            try:
+                doc_type = DocumentType(document_type)
+            except ValueError:
+                doc_type = DocumentType.CORRESPONDENCE  # Default fallback
+        else:
+            doc_type = document_type
+        
+        # Get dynamic page limits from normal processing configuration
+        processing_config = self.configs["normal_processing"].config
+        pages_per_type = processing_config.get("pages_per_document_type", {})
+        
+        # Convert enum to string if needed
+        if hasattr(doc_type, 'value'):
+            document_type_key = doc_type.value
+        else:
+            document_type_key = str(doc_type)
+        
+        # Return document-specific page count or default
+        return pages_per_type.get(document_type_key, pages_per_type.get("default", 2))
+    
     
     def update_service_config(self, service_name: str, config: Dict[str, Any]) -> bool:
         """Update configuration for specific service"""
