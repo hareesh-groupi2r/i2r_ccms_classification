@@ -208,8 +208,8 @@ class HybridRAGClassifier:
             try:
                 genai.configure(api_key=gemini_key)
                 fallback_clients['gemini'] = {
-                    'client': genai.GenerativeModel('gemini-1.5-flash'),
-                    'model': 'gemini-1.5-flash',
+                    'client': genai.GenerativeModel('gemini-2.0-flash'),
+                    'model': 'gemini-2.0-flash',
                     'name': 'Google Gemini'
                 }
                 logger.info("Initialized Google Gemini fallback client")

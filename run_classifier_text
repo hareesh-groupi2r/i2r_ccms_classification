@@ -1,0 +1,19 @@
+curl -X POST http://localhost:5001/api/services/hybrid-rag-classification/classify-text \
+    -H "Content-Type: application/json" \
+    -d '{
+      "text": "This is a letter regarding contract modifications and change orders for the 
+  highway construction project. The contractor is requesting approval for additional work due 
+  to unforeseen site conditions.",
+      "debug_logging": true,
+      "log_classification_details": true
+    }'
+
+#Optional parameters you can include:
+#
+#  - "top_k": 15 - Number of similar documents to retrieve
+#  - "similarity_threshold": 0.4 - Minimum similarity score
+#  - "llm_model": "claude-sonnet-4-20250514" - Specific LLM model
+#  - "include_confidence_scores": true - Include confidence metrics
+#
+#  The response will contain the classification results with categories, issue types, and
+#  confidence scores.

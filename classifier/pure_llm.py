@@ -77,7 +77,7 @@ class PureLLMClassifier:
             google_api_key = os.getenv('GOOGLE_API_KEY')
             if google_api_key:
                 genai.configure(api_key=google_api_key)
-                clients['gemini'] = genai.GenerativeModel('gemini-1.5-flash')
+                clients['gemini'] = genai.GenerativeModel('gemini-2.0-flash')
                 logger.info("✅ Gemini client initialized")
             else:
                 logger.warning("⚠️  Google API key not found - Gemini unavailable")

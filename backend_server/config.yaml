@@ -14,6 +14,8 @@ approaches:
     embedding_model: "all-mpnet-base-v2"
     llm_model: "claude-sonnet-4-20250514"  # Use Anthropic (will test error handling)
     vector_db: "faiss"  # Options: faiss, pinecone, qdrant
+    # Use pre-computed embeddings from shared data directory
+    index_path: "../data/embeddings/rag_index"
     top_k: 20             # More candidates for diverse issue discovery  
     window_size: 3        # Keep for good context matching
     overlap: 1            # Keep for good issue detection
@@ -83,12 +85,14 @@ routing:
 
 # Data paths
 data:
-  training_data: "data/raw/Consolidated_labeled_data.xlsx"
+  training_data: "../data/synthetic/combined_training_data.xlsx"
   test_data: "data/raw/EDMS-Lot 11.xlsx"
   test_pdfs: "data/raw/Lot-11"
-  processed_dir: "data/processed"
-  models_dir: "data/models"
-  embeddings_dir: "data/embeddings"
+  processed_dir: "../data/processed"
+  models_dir: "../data/models"
+  embeddings_dir: "../data/embeddings"
+  # Pre-computed embeddings index path (relative to backend_server directory)
+  index_path: "../data/embeddings/rag_index"
 
 # Validation settings
 validation:

@@ -4,6 +4,7 @@ Supports automatic detection of 10+ document types using keyword and pattern mat
 """
 
 import re
+import sys
 from typing import Dict, List, Optional, Tuple
 from pathlib import Path
 from pypdf import PdfReader
@@ -11,6 +12,14 @@ from docx import Document
 
 from .interfaces import IDocumentTypeService, ProcessingResult, ProcessingStatus, DocumentType
 from .configuration_service import get_config_service
+
+# Add classifier directory to path
+import os
+classifier_path = os.path.join(os.path.dirname(__file__), '..', '..', 'classifier')
+if classifier_path not in sys.path:
+    sys.path.insert(0, classifier_path)
+
+from pdf_extractor import PDFExtractor
 
 
 class DocumentTypeService(IDocumentTypeService):
@@ -22,13 +31,18 @@ class DocumentTypeService(IDocumentTypeService):
         
         # Extract configuration for all document types
         self.document_types_config = self._load_document_type_configs()
-        self.pages_to_check = self.config.get("pages_to_check", 5)
+        self.pages_to_check = self.config.get("pages_to_check", 1)  # Only first page for fast processing
         self.confidence_threshold = self.config.get("confidence_threshold", 0.6)
         self.min_keyword_matches = self.config.get("min_keyword_matches", 2)
         self.pattern_weight = self.config.get("pattern_weight", 3)
         self.keyword_weight = self.config.get("keyword_weight", 1)
+        self.filename_weight = self.config.get("filename_weight", 2)
         self.length_based_scoring = self.config.get("length_based_scoring", True)
         self.document_type_priority = self.config.get("document_type_priority", {})
+        self.filename_keywords = self.config.get("filename_keywords", {})
+        
+        # Initialize PDFExtractor with OCR support for scanned documents
+        self.pdf_extractor = PDFExtractor(max_pages=self.pages_to_check, ocr_threshold=50)
     
     def _load_document_type_configs(self) -> Dict[DocumentType, Dict[str, any]]:
         """Load configuration for all document types"""
@@ -68,6 +82,40 @@ class DocumentTypeService(IDocumentTypeService):
                 parsed_terms[pattern] = 0
         return parsed_terms
     
+    def _get_pdf_page_count(self, file_path: str) -> int:
+        """Get the total number of pages in a PDF document"""
+        try:
+            with open(file_path, 'rb') as file:
+                reader = PdfReader(file)
+                return len(reader.pages)
+        except Exception as e:
+            print(f"Warning: Could not get page count for {file_path}: {e}")
+            return 0
+    
+    def _calculate_filename_score(self, file_path: str) -> Dict[DocumentType, int]:
+        """Calculate scores based on filename keywords"""
+        filename = Path(file_path).stem.lower()  # Get filename without extension
+        filename_scores = {}
+        
+        # Initialize all document types with 0 score
+        for doc_type in DocumentType:
+            if doc_type not in [DocumentType.UNKNOWN, DocumentType.OTHERS]:
+                filename_scores[doc_type] = 0
+        
+        # Check filename against keywords for each document type
+        for doc_type_key, keywords in self.filename_keywords.items():
+            try:
+                doc_type = DocumentType(doc_type_key)
+                score = 0
+                for keyword in keywords:
+                    if keyword.lower() in filename:
+                        score += 1
+                filename_scores[doc_type] = score
+            except ValueError:
+                continue  # Skip invalid document types
+        
+        return filename_scores
+
     def classify_document(self, file_path: str, **kwargs) -> ProcessingResult:
         """
         Classify document type from PDF or DOCX file
@@ -92,11 +140,21 @@ class DocumentTypeService(IDocumentTypeService):
             # Extract text based on file type
             pages_to_check = kwargs.get("pages_to_check", self.pages_to_check)
             
+            # Get filename scores for enhanced classification
+            filename_scores = self._calculate_filename_score(file_path)
+            
+            # Always use 1 page for fast document type classification
+            # Dynamic page limits are only used during actual document processing
+            
             # Determine file type and extract text accordingly
             file_extension = Path(file_path).suffix.lower()
+            page_count = 0
+            
             if file_extension == '.docx':
                 text_result = self._extract_text_from_docx(file_path)
             else:
+                # Get PDF page count for contract agreement detection
+                page_count = self._get_pdf_page_count(file_path)
                 text_result = self._extract_text_from_pdf(file_path, pages_to_check)
             
             if text_result.status == ProcessingStatus.ERROR:
@@ -104,9 +162,11 @@ class DocumentTypeService(IDocumentTypeService):
             
             text_content = text_result.data
             
-            # Classify based on text content
+            # Classify based on text content with page count and filename scores
             classification_result = self.classify_from_text(
                 text_content, 
+                page_count=page_count,
+                filename_scores=filename_scores,
                 use_advanced_classification=kwargs.get("use_advanced_classification", True)
             )
             
@@ -115,7 +175,8 @@ class DocumentTypeService(IDocumentTypeService):
             classification_result.metadata.update({
                 "file_path": file_path,
                 "pages_analyzed": pages_to_check,
-                "text_length": len(text_content)
+                "text_length": len(text_content),
+                "total_pages": page_count
             })
             
             return classification_result
@@ -126,7 +187,7 @@ class DocumentTypeService(IDocumentTypeService):
                 error_message=f"Error classifying document: {str(e)}"
             )
     
-    def classify_from_text(self, text_content: str, **kwargs) -> ProcessingResult:
+    def classify_from_text(self, text_content: str, page_count: int = 0, **kwargs) -> ProcessingResult:
         """
         Classify document type from text content using enhanced multi-type classification
         
@@ -150,6 +211,9 @@ class DocumentTypeService(IDocumentTypeService):
             use_advanced = kwargs.get("use_advanced_classification", True)
             confidence_threshold = kwargs.get("confidence_threshold", self.confidence_threshold)
             
+            # Get filename scores if provided
+            filename_scores = kwargs.get("filename_scores", {})
+            
             # Calculate scores for all document types
             type_scores = {}
             detailed_analysis = {}
@@ -157,22 +221,24 @@ class DocumentTypeService(IDocumentTypeService):
             for doc_type, config in self.document_types_config.items():
                 keyword_score = self._calculate_keyword_score(text_lower, config["keywords"])
                 pattern_score = 0
+                filename_score = filename_scores.get(doc_type, 0)
                 
                 if use_advanced and config["patterns"]:
                     pattern_score = self._calculate_pattern_score(text_content, config["patterns"])
                 
                 # Combined score with weights
-                total_score = (keyword_score * self.keyword_weight) + (pattern_score * self.pattern_weight)
+                total_score = (keyword_score * self.keyword_weight) + (pattern_score * self.pattern_weight) + (filename_score * self.filename_weight)
                 
                 # Apply length-based scoring for specific document types
                 if self.length_based_scoring:
-                    length_bonus = self._calculate_length_bonus(doc_type, text_content)
+                    length_bonus = self._calculate_length_bonus(doc_type, text_content, page_count)
                     total_score += length_bonus
                 
                 type_scores[doc_type] = total_score
                 detailed_analysis[doc_type.value] = {
                     "keyword_score": keyword_score,
                     "pattern_score": pattern_score,
+                    "filename_score": filename_score,
                     "total_score": total_score,
                     "keyword_matches": self._get_keyword_matches(text_lower, config["keywords"]),
                     "pattern_matches": self._get_pattern_matches(text_content, config["patterns"]) if use_advanced else []
@@ -203,6 +269,9 @@ class DocumentTypeService(IDocumentTypeService):
                 doc_type = DocumentType.UNKNOWN
                 confidence = confidence  # Keep original confidence for analysis
             
+            # Check for unsupported document types and add warnings
+            warning_message = self._get_support_warning(doc_type)
+            
             return ProcessingResult(
                 status=ProcessingStatus.SUCCESS,
                 data=doc_type,
@@ -211,9 +280,11 @@ class DocumentTypeService(IDocumentTypeService):
                     "all_scores": {dt.value: score for dt, score in type_scores.items()},
                     "detailed_analysis": detailed_analysis,
                     "text_length": len(text_content),
+                    "total_pages": page_count,
                     "advanced_patterns_used": use_advanced,
                     "confidence_threshold": confidence_threshold,
-                    "classification_method": "enhanced_multi_type"
+                    "classification_method": "enhanced_multi_type",
+                    "support_warning": warning_message
                 }
             )
             
@@ -243,27 +314,66 @@ class DocumentTypeService(IDocumentTypeService):
                 continue
         return score
     
-    def _calculate_length_bonus(self, doc_type: DocumentType, text_content: str) -> float:
+    def _calculate_length_bonus(self, doc_type: DocumentType, text_content: str, page_count: int = 0) -> float:
         """Apply length-based scoring bonuses for specific document types"""
         text_length = len(text_content)
         
-        # Contract agreements are typically long documents
-        if doc_type == DocumentType.CONTRACT_AGREEMENTS and text_length > 5000:
-            return 1.0
+        # Contract agreements: Page count is the primary indicator
+        if doc_type == DocumentType.CONTRACT_AGREEMENTS:
+            if page_count > 200:  # Strong indicator for contract agreements (200+ pages)
+                return 3.0  # Very high bonus for 200+ page documents
+            elif page_count > 100:  # Large document but may not be contract
+                return 1.0
+            elif text_length > 50000:  # Very large text content
+                return 1.5
+            elif text_length > 20000:  # Medium bonus for large docs
+                return 0.5
+            else:
+                return -1.0  # Penalty for short documents - likely not contracts
+        
+        # Correspondence letters: Favor typical letter lengths
+        elif doc_type == DocumentType.CORRESPONDENCE:
+            if 500 <= text_length <= 8000:  # Expanded typical letter range
+                return 1.0  # Increased bonus for correspondence
+            elif text_length > 15000:  # Too long for typical letter
+                return -0.3  # Light penalty for very long letters
+            else:
+                return 0.2  # Small bonus for short notes/memos
+        
+        # Meeting minutes: Structured content, medium length
+        elif doc_type == DocumentType.MEETING_MINUTES:
+            if 2000 <= text_length <= 15000:  # Expanded range for minutes
+                return 0.8
+            elif text_length < 1000:  # Too short for proper minutes
+                return -0.5
         
         # Technical drawings often have shorter text with specific terms
         elif doc_type == DocumentType.TECHNICAL_DRAWINGS and text_length < 2000:
             return 0.5
         
-        # Correspondence letters are typically medium length
-        elif doc_type == DocumentType.CORRESPONDENCE and 1000 <= text_length <= 3000:
-            return 0.5
-        
-        # Meeting minutes can vary but often have structured content
-        elif doc_type == DocumentType.MEETING_MINUTES and 2000 <= text_length <= 8000:
-            return 0.5
+        # Progress reports: Medium to long structured documents
+        elif doc_type == DocumentType.PROGRESS_REPORTS and 3000 <= text_length <= 12000:
+            return 0.6
         
         return 0
+    
+    def _get_support_warning(self, doc_type: DocumentType) -> Optional[str]:
+        """Get warning message for unsupported document types"""
+        supported_types = {
+            DocumentType.CORRESPONDENCE,
+            DocumentType.MEETING_MINUTES,
+            DocumentType.PROGRESS_REPORTS,
+            DocumentType.CONTRACT_AGREEMENTS
+        }
+        
+        if doc_type not in supported_types:
+            type_name = doc_type.value.replace('_', ' ').title()
+            return (f"⚠️ WARNING: {type_name} document type detected but processing handler "
+                   f"is not implemented yet. This document type will be supported in the next phase. "
+                   f"Currently supported types: Contract Agreements, Correspondence Letters, "
+                   f"Meeting Minutes, and Progress Reports.")
+        
+        return None
     
     def _resolve_tie(self, tied_types: List[DocumentType]) -> DocumentType:
         """Resolve ties between document types using priority system"""
@@ -312,23 +422,10 @@ class DocumentTypeService(IDocumentTypeService):
         return matches
     
     def _extract_text_from_pdf(self, file_path: str, pages_to_check: int) -> ProcessingResult:
-        """Extract text from first few pages of PDF"""
+        """Extract text from first few pages of PDF using OCR if needed"""
         try:
-            reader = PdfReader(file_path)
-            text_content = ""
-            num_pages = len(reader.pages)
-            pages_processed = 0
-            
-            for i in range(min(num_pages, pages_to_check)):
-                try:
-                    page = reader.pages[i]
-                    extracted = page.extract_text()
-                    if extracted and extracted.strip():
-                        text_content += extracted + "\n"
-                        pages_processed += 1
-                except Exception as page_error:
-                    print(f"Warning: Could not extract text from page {i+1}: {page_error}")
-                    continue
+            # Use PDFExtractor with OCR support for scanned documents
+            text_content, extraction_method = self.pdf_extractor.extract_text(file_path)
             
             if not text_content.strip():
                 return ProcessingResult(
@@ -336,12 +433,20 @@ class DocumentTypeService(IDocumentTypeService):
                     error_message="No readable text found in PDF"
                 )
             
+            # Get PDF page count for metadata
+            try:
+                reader = PdfReader(file_path)
+                total_pages = len(reader.pages)
+            except:
+                total_pages = pages_to_check
+            
             return ProcessingResult(
                 status=ProcessingStatus.SUCCESS,
                 data=text_content,
                 metadata={
-                    "pages_processed": pages_processed,
-                    "total_pages": num_pages,
+                    "extraction_method": extraction_method,
+                    "total_pages": total_pages,
+                    "pages_analyzed": pages_to_check,
                     "text_length": len(text_content)
                 }
             )

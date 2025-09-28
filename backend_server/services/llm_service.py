@@ -23,7 +23,7 @@ class LLMService(ILLMService):
         
         # LLM configuration
         self.api_key = self.config.get("api_key")
-        self.model_name = self.config.get("model_name", "gemini-1.5-flash")
+        self.model_name = self.config.get("model_name", "gemini-2.0-flash")
         self.temperature = self.config.get("temperature", 0.1)
         self.max_tokens = self.config.get("max_tokens", 4000)
         self.timeout = self.config.get("timeout", 60)
