@@ -1,0 +1,7 @@
+│   curl -X POST http://localhost:5001/api/services/hybrid-rag-classification/process-folder -H         │
+│   "Content-Type: application/json" -d '{"folder_path":                                                │
+│   "/Users/hareeshkb/work/Krishna/ccms_classification/data/Lots21-27/Lot 21 to 23/LOT-21",             │
+│   "output_folder": "/tmp/lot21_test_final", "max_pages_per_pdf": 2, "approaches": ["hybrid_rag"],     │
+│   "save_format": "xlsx", "per_file_logging": true, "log_text_extraction": true,                       │
+│   "log_classification_details": true, "create_per_file_logs": true, "enable_metrics": true,           │
+│   "include_patterns": ["1. AE to SPK*"]}' --max-time 120 

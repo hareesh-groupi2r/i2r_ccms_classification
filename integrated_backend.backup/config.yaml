@@ -1,0 +1,133 @@
+# Configuration for Contract Correspondence Classification System
+
+# Approach configuration - Enable/disable different classification approaches
+approaches:
+  pure_llm:
+    enabled: true  # Can be toggled via batch processing config
+    model: "gpt-4-turbo"  # Options: gpt-4-turbo, gpt-4, gpt-3.5-turbo, claude-3-opus, claude-3-sonnet
+    max_tokens: 4096
+    temperature: 0.1
+    validate_mapping: true
+    
+  hybrid_rag:
+    enabled: true  # Recommended to keep enabled for better performance
+    embedding_model: "all-mpnet-base-v2"
+    llm_model: "claude-sonnet-4-20250514"  # Use Anthropic instead of OpenAI
+    vector_db: "faiss"  # Options: faiss, pinecone, qdrant
+    top_k: 15
+    window_size: 3
+    overlap: 1
+    similarity_threshold: 0.4   # Higher threshold to reduce noise and false positives
+    max_issues: 5         # Reduced from 10 to focus on high-confidence matches
+    document_context_chars: 2500  # More context for LLM
+    confidence_decay: 0.03
+    min_llm_confidence: 0.01
+    
+  legalbert:
+    enabled: false  # Enable after model training
+    model_path: "./data/models/legalbert-finetuned"
+    max_length: 512
+    batch_size: 8
+    
+  google_docai:
+    enabled: false  # Requires Google Cloud setup
+    processor_id: "contract-parser"
+    location: "us"
+    gemini_model: "gemini-1.5-flash"
+    
+  open_source:
+    enabled: false  # Requires local model setup
+    ocr: "tesseract"  # Options: doctr, tesseract
+    llm_model: "mistralai/Mixtral-8x7B-Instruct-v0.1"
+    embedding_model: "BAAI/bge-large-en"
+    device: "cpu"  # Options: cuda, cpu
+
+# Ensemble configuration
+ensemble:
+  enabled: false
+  min_approaches: 2
+  voting_strategy: "weighted"  # Options: weighted, majority
+  weights:
+    pure_llm: 0.30
+    hybrid_rag: 0.30
+    legalbert: 0.20
+    google_docai: 0.15
+    open_source: 0.05
+
+# Document routing rules
+routing:
+  auto_select: true
+  rules:
+    - condition: "page_count > 20"
+      use_approach: "hybrid_rag"
+    - condition: "is_scanned == true"
+      use_approach: "google_docai"
+    - condition: "criticality == 'high'"
+      use_approach: "ensemble"
+    - condition: "budget == 'low'"
+      use_approach: "legalbert"
+
+# Data paths
+data:
+  training_data: "data/raw/Consolidated_labeled_data.xlsx"
+  test_data: "data/raw/EDMS-Lot 11.xlsx"
+  test_pdfs: "data/raw/Lot-11"
+  processed_dir: "data/processed"
+  models_dir: "data/models"
+  embeddings_dir: "data/embeddings"
+
+# Validation settings
+validation:
+  enable_strict_validation: true
+  auto_correct: true
+  similarity_threshold: 0.7
+  case_sensitive: false
+  log_hallucinations: true
+
+# Data sufficiency settings
+data_sufficiency:
+  enable_warnings: true
+  thresholds:
+    critical: 5
+    warning: 10
+    good: 20
+    excellent: 50
+  confidence_adjustments:
+    critical: 0.5
+    warning: 0.7
+    good: 0.85
+    very_good: 0.95
+    excellent: 1.0
+
+# API settings
+api:
+  host: "0.0.0.0"
+  port: 5000
+  debug: true
+  cors_enabled: true
+  max_content_length: 16777216  # 16MB
+  request_timeout: 30  # seconds
+
+# Monitoring and logging
+monitoring:
+  track_metrics: true
+  log_level: "INFO"
+  save_results: true
+  results_path: "./reports/results"
+  enable_telemetry: false
+
+# Cache settings
+cache:
+  enabled: true
+  type: "redis"  # Options: redis, memory
+  redis_host: "localhost"
+  redis_port: 6379
+  redis_db: 0
+  ttl: 3600  # seconds
+
+# Performance settings
+performance:
+  batch_processing: true
+  max_batch_size: 10
+  parallel_workers: 4
+  gpu_enabled: false
