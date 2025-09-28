@@ -74,7 +74,7 @@ class DocumentProcessingOrchestrator(IDocumentProcessingOrchestrator):
         self.cleanup_temp_files = self.config.get("cleanup_temp_files", True)
         self.max_file_size_mb = self.config.get("max_file_size_mb", 200)
         self.processing_timeout = self.config.get("processing_timeout", 600)
-        self.supported_formats = self.config.get("supported_formats", ["pdf", "png", "jpg", "jpeg", "tiff"])
+        self.supported_formats = self.config.get("supported_formats", ["pdf", "png", "jpg", "jpeg", "tiff", "docx"])
         
         # PDF optimization settings
         self.optimize_pdfs = self.config.get("optimize_pdfs", True)
@@ -154,16 +154,18 @@ class DocumentProcessingOrchestrator(IDocumentProcessingOrchestrator):
                         file_ext = Path(filename).suffix.lower()
                         is_pdf = file_ext == '.pdf'
                         is_image = file_ext in ['.jpg', '.jpeg', '.png', '.tiff', '.tif', '.bmp', '.webp']
-                        
-                        if is_pdf or is_image:
+                        is_docx = file_ext in ['.docx', '.doc']
+
+                        if is_pdf or is_image or is_docx:
+                            file_type = 'pdf' if is_pdf else ('image' if is_image else 'docx')
                             extracted_files.append({
                                 'path': extracted_path,
                                 'original_name': filename,
                                 'size': file_size,
-                                'type': 'pdf' if is_pdf else 'image',
+                                'type': file_type,
                                 'extension': file_ext
                             })
-                            self.logger.info(f"✅ Extracted: {filename} ({file_size} bytes, type: {'PDF' if is_pdf else 'Image'})")
+                            self.logger.info(f"✅ Extracted: {filename} ({file_size} bytes, type: {file_type.upper()})")
                         else:
                             self.logger.info(f"⚠️ Skipped unsupported file: {filename} (type: {file_ext})")
                             
@@ -445,8 +447,9 @@ class DocumentProcessingOrchestrator(IDocumentProcessingOrchestrator):
             if validation_result.status == ProcessingStatus.ERROR:
                 return validation_result
             
-            # Check if file is actually a ZIP file
-            if self._is_zip_file(context.file_path):
+            # Check if file is actually a ZIP file (but exclude DOCX files which are technically ZIP but should be processed as documents)
+            file_extension = Path(context.file_path).suffix.lower()
+            if self._is_zip_file(context.file_path) and file_extension != '.docx':
                 self.logger.info(f"📦 Detected ZIP file masquerading as {Path(context.file_path).suffix}: {Path(context.file_path).name}")
                 
                 # Create temp directory for extraction
@@ -841,6 +844,94 @@ class DocumentProcessingOrchestrator(IDocumentProcessingOrchestrator):
         
         return None
     
+    def _validate_extracted_data(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Validate and normalize extracted data to match database constraints"""
+        if not isinstance(data, dict):
+            return data
+        
+        # Create a copy to avoid modifying the original
+        validated_data = data.copy()
+        
+        # Normalize urgency_level for correspondence letters
+        if "urgency_level" in validated_data:
+            urgency_value = str(validated_data["urgency_level"]).lower().strip()
+            
+            # Map common variations to expected values
+            urgency_mapping = {
+                # Direct matches
+                "urgent": "urgent",
+                "normal": "normal", 
+                "routine": "routine",
+                
+                # Common variations
+                "high": "urgent",
+                "critical": "urgent",
+                "priority": "urgent",
+                "immediate": "urgent",
+                "asap": "urgent",
+                
+                "medium": "normal",
+                "standard": "normal",
+                "regular": "normal",
+                "moderate": "normal",
+                
+                "low": "routine",
+                "minor": "routine",
+                "non-urgent": "routine",
+                "informational": "routine"
+            }
+            
+            # Normalize the value
+            normalized_urgency = urgency_mapping.get(urgency_value, "normal")  # Default to 'normal'
+            validated_data["urgency_level"] = normalized_urgency
+            
+            # Log the mapping for debugging
+            if urgency_value != normalized_urgency:
+                logging.info(f"🔧 Normalized urgency_level: '{urgency_value}' → '{normalized_urgency}'")
+        
+        # Normalize letter_type for correspondence letters
+        if "letter_type" in validated_data:
+            letter_value = str(validated_data["letter_type"]).lower().strip()
+            
+            # Map to expected values
+            letter_type_mapping = {
+                "complaint": "complaint",
+                "request": "request", 
+                "notice": "notice",
+                "response": "response",
+                "claim": "claim",
+                "other": "other",
+                
+                # Common variations
+                "query": "request",
+                "inquiry": "request",
+                "application": "request",
+                "proposal": "request",
+                
+                "notification": "notice",
+                "alert": "notice",
+                "announcement": "notice",
+                
+                "reply": "response",
+                "answer": "response",
+                "feedback": "response",
+                
+                "objection": "complaint",
+                "grievance": "complaint",
+                "issue": "complaint",
+                
+                "demand": "claim",
+                "billing": "claim"
+            }
+            
+            normalized_letter_type = letter_type_mapping.get(letter_value, "other")  # Default to 'other'
+            validated_data["letter_type"] = normalized_letter_type
+            
+            if letter_value != normalized_letter_type:
+                logging.info(f"🔧 Normalized letter_type: '{letter_value}' → '{normalized_letter_type}'")
+        
+        return validated_data
+    
     def _extract_structured_data(self, text: str, extraction_schema: Dict[str, str], context: ProcessingContext) -> ProcessingResult:
         """Extract structured data using LLM service"""
         llm_options = {
@@ -849,7 +940,13 @@ class DocumentProcessingOrchestrator(IDocumentProcessingOrchestrator):
             "max_retries": context.processing_options.get("llm_retries", 2)
         }
         
-        return self.llm_service.extract_structured_data(text, extraction_schema, **llm_options)
+        result = self.llm_service.extract_structured_data(text, extraction_schema, **llm_options)
+        
+        # Validate and normalize the extracted data
+        if result.status == ProcessingStatus.SUCCESS and result.data:
+            result.data = self._validate_extracted_data(result.data)
+        
+        return result
     
     def _classify_issues(self, structured_data: Dict[str, Any], context: ProcessingContext) -> ProcessingResult:
         """Classify issues from structured data"""

@@ -1,0 +1,14 @@
+│   curl -X POST http://localhost:5001/api/services/hybrid-rag-classification/process-folder \          │
+│     -H "Content-Type: application/json" \                                                             │
+│     -d '{                                                                                             │
+│       "folder_path": "/Users/hareeshkb/work/Krishna/ccms_classification/data/Lots21-27/Lot 21 to      │
+│   23/LOT-21",                                                                                         │
+│       "output_folder": "/tmp/lot21_false_positive_fixes_test_v2",                                     │
+│       "include_patterns": [                                                                           │
+│         "1. AE to SPK ltr no 1963 dt 16.09.2017.pdf",                                                 │
+│         "17. PD_Applicability of GST in Construction Service in Highways and Road Works.pdf"          │
+│       ],                                                                                              │
+│       "per_file_logging": true,                                                                       │
+│       "debug_logging": true,                                                                          │
+│       "log_classification_details": true                                                              │
+│     }'            

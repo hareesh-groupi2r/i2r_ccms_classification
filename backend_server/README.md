@@ -1,6 +1,6 @@
-# CCMS Backend Python Service
+# CCMS Classification Backend Service
 
-Document processing service for the Contract Correspondence Management System (CCMS).
+This directory contains the core backend service files needed for integration into other applications.
 
 ## 🚀 Quick Start
 
@@ -12,12 +12,38 @@ Document processing service for the Contract Correspondence Management System (C
 
 Copy .env.example to .env and update the keys
 
-
 Then configure your API keys and run:
 
 ```bash
-./run_backend.sh
+./start_ccms_backend.sh
 ```
+
+## 🏗️ Core Components
+
+### API Service
+- `api/app.py` - Main Flask application
+- `api/service_endpoints.py` - REST API endpoints
+
+### Services
+- `services/` - Core business logic services
+  - `hybrid_rag_classification_service.py` - Main classification service
+  - `category_mapping_service.py` - Category mapping logic
+  - `document_processing_orchestrator.py` - Document processing workflow
+  - `llm_service.py` - LLM integration
+  - `ocr_service.py` - OCR processing
+  - Other supporting services
+
+### Classifier Modules (External)
+- `../classifier/` - Core classification algorithms (shared at project root)
+  - `hybrid_rag.py` - Hybrid RAG implementation  
+  - `pure_llm.py` - Pure LLM classification
+  - `pdf_extractor.py` - PDF processing
+  - `embeddings.py` - Embedding management
+  - Other classification modules
+
+### Configuration
+- `config.yaml` - Main configuration file
+- `requirements.txt` - Python dependencies
 
 ## 📋 Prerequisites
 
@@ -100,7 +126,7 @@ GOOGLE_CLOUD_PROJECT=your_project_id
 ### Development Mode (Recommended)
 
 ```bash
-./run_backend.sh
+./start_ccms_backend.sh
 ```
 
 The service will start at: http://localhost:5001
@@ -124,21 +150,40 @@ curl http://localhost:5001/health
 ## 📁 Project Structure
 
 ```
-backend_python_cms_app_proj/
+backend_server/
 ├── .venv/                 # Virtual environment (auto-generated)
 ├── api/                   # Flask web application
 │   ├── app.py            # Main Flask app
 │   └── service_endpoints.py  # API routes
 ├── services/              # Document processing services
+│   ├── hybrid_rag_classification_service.py  # Main classification service
+│   ├── category_mapping_service.py          # Category mapping
+│   ├── document_processing_orchestrator.py  # Processing workflow
 │   ├── ocr_service.py    # OCR processing
 │   ├── llm_service.py    # LLM integration
 │   └── ...               # Other services
+├── ../classifier/        # Core classification modules (shared at project root)
+│   ├── hybrid_rag.py     # Hybrid RAG implementation
+│   ├── pure_llm.py       # Pure LLM classification
+│   ├── pdf_extractor.py  # PDF processing
+│   ├── embeddings.py     # Embedding management
+│   └── ...               # Other classification modules
+├── ../data/               # Shared data directory (at project root)
 ├── requirements.txt       # Python dependencies
+├── config.yaml           # Configuration
 ├── .env                  # Environment configuration
 ├── setup.sh              # One-command setup script
-├── run_backend.sh                # Service run script
+├── start_ccms_backend.sh    # Main service startup script
+├── run_backend.sh        # Alternative run script
 └── README.md             # This file
 ```
+
+## 🔧 Integration Notes
+
+- This backend service is self-contained and can be integrated into any application
+- All imports are relative to the backend_server directory
+- Configuration is centralized in `config.yaml`
+- API endpoints are documented in `api/README_API.md`
 
 ## 🛠️ Development
 

@@ -47,7 +47,7 @@ approaches:
     enabled: false  # Requires Google Cloud setup
     processor_id: "contract-parser"
     location: "us"
-    gemini_model: "gemini-1.5-flash"
+    gemini_model: "gemini-2.0-flash"
     
   open_source:
     enabled: false  # Requires local model setup
